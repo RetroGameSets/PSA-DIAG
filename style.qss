@@ -1,0 +1,74 @@
+
+/* Dark theme QSS */
+QWidget {
+    background-color: #121417;
+    color: #d6d9de;
+    font-family: "Segoe UI", "Inter", sans-serif;
+    font-size: 12px;
+}
+#sidebar {
+    background-color: transparent;
+}
+#content {
+    background-color: #181b1f;
+    border-radius: 8px;
+    padding: 8px;
+}
+#titleLabel {
+    font-weight: 700;
+    font-size: 16px;
+}
+#sectionHeader {
+    font-size: 14px;
+    font-weight: 600;
+    margin-bottom: 6px;
+}
+QPushButton {
+    background-color: #2b3036;
+    border: 1px solid #2b3036;
+    color: #d6d9de;
+    padding: 8px 12px;
+    border-radius: 8px;
+}
+QPushButton#titleButton {
+    background-color: transparent;
+    border: 1px solid #2b3036;
+}
+QPushButton:hover {
+    background-color: #2f6a80;
+}
+QPushButton:checked {
+    background-color: #0e9aa7;
+    color: white;
+}
+QProgressBar {
+    background-color: #202428;
+    border-radius: 6px;
+    height: 16px;
+    text-align: center;
+}
+QProgressBar::chunk {
+    background-color: #0e9aa7;
+    border-radius: 6px;
+}
+QLabel#titleLabel {
+    color: #ffffff;
+}
+QLabel {
+    color: #d6d9de;
+}
+QCheckBox {
+    color: #d6d9de;
+}
+QCheckBox::indicator {
+    width: 13px;
+    height: 13px;
+}
+QCheckBox::indicator:unchecked {
+    border: 1px solid #2b3036;
+    background-color: #2b3036;
+}
+QCheckBox::indicator:checked {
+    border: 1px solid #0e9aa7;
+    background-color: #0e9aa7;
+}
