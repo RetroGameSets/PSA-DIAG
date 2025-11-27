@@ -15,14 +15,72 @@ import time
 import shutil
 import ctypes
 import subprocess
+import logging
+from datetime import datetime
 
 BASE = Path(__file__).resolve().parent
+APP_VERSION = "2.0.0.0"
+URL_LAST_VERSION_PSADIAG = "https://psa-diag.fr/diagbox/install/last_version_psadiag.json"
+URL_LAST_VERSION_DIAGBOX = "https://psa-diag.fr/diagbox/install/last_version_diagbox.json"
+
+# Configure logging
+log_folder = BASE / "logs"
+log_folder.mkdir(exist_ok=True)
+log_file = log_folder / f"psa_diag_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+
+logging.basicConfig(
+    level=logging.DEBUG,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler(log_file, encoding='utf-8')
+        # StreamHandler removed - console will be integrated in UI
+    ]
+)
+
+logger = logging.getLogger(__name__)
+logger.info(f"PSA-DIAG v{APP_VERSION} starting...")
+
+class QTextEditLogger(logging.Handler):
+    """Custom logging handler that writes to a QTextEdit widget"""
+    def __init__(self, text_edit):
+        super().__init__()
+        self.text_edit = text_edit
+    
+    def emit(self, record):
+        msg = self.format(record)
+        # Use invokeMethod to ensure thread safety
+        QtCore.QMetaObject.invokeMethod(
+            self.text_edit,
+            "append",
+            QtCore.Qt.ConnectionType.QueuedConnection,
+            QtCore.Q_ARG(str, msg)
+        )
+
+def hide_console():
+    """Hide the console window on Windows"""
+    if sys.platform == 'win32':
+        try:
+            import ctypes
+            kernel32 = ctypes.windll.kernel32
+            user32 = ctypes.windll.user32
+            
+            # Get console window handle
+            hwnd = kernel32.GetConsoleWindow()
+            if hwnd:
+                # Hide the console window
+                user32.ShowWindow(hwnd, 0)  # SW_HIDE = 0
+                logger.info("Console window hidden")
+        except Exception as e:
+            logger.error(f"Failed to hide console: {e}")
 
 def is_admin():
     """Check if the script is running with admin privileges"""
     try:
-        return ctypes.windll.shell32.IsUserAnAdmin() != 0
-    except:
+        is_admin = ctypes.windll.shell32.IsUserAnAdmin() != 0
+        logger.info(f"Admin check: {is_admin}")
+        return is_admin
+    except Exception as e:
+        logger.error(f"Admin check failed: {e}")
         return False
 
 def run_as_admin():
@@ -33,6 +91,7 @@ def run_as_admin():
             script = os.path.abspath(sys.argv[0])
             params = ' '.join([script] + sys.argv[1:])
             
+            logger.info("Requesting admin elevation...")
             # Use ShellExecuteW to run as admin
             ctypes.windll.shell32.ShellExecuteW(
                 None, 
@@ -44,30 +103,36 @@ def run_as_admin():
             )
             return True
     except Exception as e:
-        print(f"Failed to elevate privileges: {e}")
+        logger.error(f"Failed to elevate privileges: {e}")
         return False
     return False
 
 # Load style
 def load_qss():
-    qss_path = BASE / "ui" / "style.qss"
+    qss_path = BASE / "style.qss"
     try:
         if qss_path.exists():
+            logger.info(f"Loading QSS from: {qss_path}")
             return qss_path.read_text()
+        else:
+            logger.warning(f"QSS file not found at: {qss_path}")
     except Exception as e:
-        print(f"Erreur lors du chargement du style QSS : {e}")
+        logger.error(f"Error loading QSS: {e}")
     return ""
 
 class SidebarButton(QtWidgets.QPushButton):
     def __init__(self, text, icon_path=None, parent=None):
         super().__init__(text, parent)
         self.setCheckable(True)
-        self.setMinimumHeight(48)
+        self.setMinimumHeight(56)
+        self.setMinimumWidth(60)
         self.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
         if icon_path and icon_path.exists():
             icon = QtGui.QIcon(str(icon_path))
             self.setIcon(icon)
-            self.setIconSize(QtCore.QSize(22,22))
+            self.setIconSize(QtCore.QSize(28, 28))
+        # Center the icon by removing text and ensuring proper alignment
+        self.setText("")
 
 
 import os
@@ -76,11 +141,11 @@ class DownloadThread(QtCore.QThread):
     progress = QtCore.Signal(int, float, str)  # value, speed_mbs, eta_str
     finished = QtCore.Signal(bool, str)
 
-    def __init__(self, url, path, last_version, total_size=0):
+    def __init__(self, url, path, last_version_diagbox, total_size=0):
         super().__init__()
         self.url = url
         self.path = path
-        self.last_version = last_version
+        self.last_version_diagbox = last_version_diagbox
         self.total_size = total_size
         self._is_cancelled = False
         self._is_paused = False
@@ -99,11 +164,25 @@ class DownloadThread(QtCore.QThread):
 
     def run(self):
         try:
+            logger.info(f"Starting download: {self.url}")
             response = requests.get(self.url, stream=True)
             response.raise_for_status()
+            
+            # Try to get content length from response if not provided
+            if self.total_size == 0:
+                content_length = response.headers.get('content-length')
+                if content_length:
+                    self.total_size = int(content_length)
+                    logger.info(f"File size from GET response: {self.total_size / (1024*1024):.2f} MB")
+            
             downloaded = 0
             chunk_count = 0
             start_time = time.time()
+            
+            if self.total_size > 0:
+                logger.info(f"Download initiated, total size: {self.total_size / (1024*1024):.2f} MB")
+            else:
+                logger.info(f"Download initiated, size unknown")
             with open(self.path, 'wb') as f:
                 for chunk in response.iter_content(chunk_size=8192):
                     # Check if paused
@@ -115,7 +194,8 @@ class DownloadThread(QtCore.QThread):
                         f.close()
                         if os.path.exists(self.path):
                             os.remove(self.path)
-                        self.finished.emit(False, f"Download Diagbox {self.last_version} cancelled")
+                        logger.warning(f"Download cancelled: Diagbox {self.last_version_diagbox}")
+                        self.finished.emit(False, f"Download Diagbox {self.last_version_diagbox} cancelled")
                         return
                     if chunk:
                         f.write(chunk)
@@ -131,17 +211,21 @@ class DownloadThread(QtCore.QThread):
                                 eta_seconds = remaining / (speed * 1024 * 1024) if speed > 0 else 0
                                 eta_str = f"{int(eta_seconds // 60):02d}:{int(eta_seconds % 60):02d}"
                             else:
+                                # Show downloaded MB when total size is unknown
                                 progress = 0
-                                eta_str = "--:--"
+                                eta_str = f"{downloaded / (1024 * 1024):.1f} MB"
                             self.progress.emit(progress, speed, eta_str)
             if self.total_size == 0 or downloaded >= self.total_size:
                 self.progress.emit(1000, 0, "00:00")
             if os.path.exists(self.path):
-                self.finished.emit(True, f"Download Diagbox {self.last_version} ok")
+                logger.info(f"Download completed successfully: Diagbox {self.last_version_diagbox}")
+                self.finished.emit(True, f"Download Diagbox {self.last_version_diagbox} ok")
             else:
-                self.finished.emit(False, f"Download Diagbox {self.last_version} failed")
+                logger.error(f"Download failed: File not found after download")
+                self.finished.emit(False, f"Download Diagbox {self.last_version_diagbox} failed")
         except Exception as e:
-            self.finished.emit(False, f"Download Diagbox {self.last_version} failed: {e}")
+            logger.error(f"Download exception: {e}", exc_info=True)
+            self.finished.emit(False, f"Download Diagbox {self.last_version_diagbox} failed: {e}")
 
 class InstallThread(QtCore.QThread):
     finished = QtCore.Signal(bool, str)
@@ -167,15 +251,18 @@ class InstallThread(QtCore.QThread):
 
     def run(self):
         try:
+            logger.info(f"Starting installation from: {self.path}")
             extraction_errors = []
             
             # Use 7z.exe for much faster extraction
             seven_zip_exe = BASE / "tools" / "7z.exe"
             
             if not seven_zip_exe.exists():
+                logger.error(f"7z.exe not found at {seven_zip_exe}")
                 self.finished.emit(False, f"7z.exe not found at {seven_zip_exe}")
                 return
             
+            logger.info("Starting 7z extraction...")
             self.progress.emit(0)
             
             try:
@@ -198,7 +285,7 @@ class InstallThread(QtCore.QThread):
                         break
                     if output:
                         # Log the output for debugging
-                        print(f"7z output: {output.strip()}")
+                        logger.debug(f"7z output: {output.strip()}")
                         
                         # 7z outputs progress like "1% 2909 - filename"
                         output = output.strip()
@@ -208,7 +295,7 @@ class InstallThread(QtCore.QThread):
                                 percent_str = output.split('%')[0].strip()
                                 if percent_str.isdigit():
                                     percent = int(percent_str)
-                                    print(f"Progress extracted: {percent}%")
+                                    logger.debug(f"Progress extracted: {percent}%")
                                     self.progress.emit(percent)
                                 
                                 # Extract filename after " - "
@@ -216,7 +303,7 @@ class InstallThread(QtCore.QThread):
                                 if filename:
                                     self.file_progress.emit(filename)
                             except Exception as e:
-                                print(f"Error parsing progress: {e}")
+                                logger.warning(f"Error parsing progress: {e}")
                                 pass
                 
                 # Get return code
@@ -237,26 +324,87 @@ class InstallThread(QtCore.QThread):
             # Build result message
             if extraction_errors:
                 error_summary = "\n".join(extraction_errors)
+                logger.warning(f"Installation completed with warnings: {error_summary}")
                 message = f"Installation completed with warnings:\n\n{error_summary}\n\nDiagbox has been installed to C:."
                 self.finished.emit(True, message)
             else:
+                logger.info("Diagbox installed successfully to C:")
                 self.finished.emit(True, "Diagbox installed successfully to C:.")
                 
         except Exception as e:
+            logger.error(f"Installation failed: {e}", exc_info=True)
             self.finished.emit(False, f"Installation failed: {e}")
+
+
+class CleanThread(QtCore.QThread):
+    """Thread for cleaning Diagbox folders and shortcuts"""
+    finished = QtCore.Signal(bool, str, int)  # success, message, success_count
+    progress = QtCore.Signal(int, int)  # current, total
+    item_progress = QtCore.Signal(str)  # current item being deleted
+
+    def __init__(self, folders, shortcuts):
+        super().__init__()
+        self.folders = folders
+        self.shortcuts = shortcuts
+        self.failed_items = []
+
+    def run(self):
+        total_items = len(self.folders) + len(self.shortcuts)
+        current_item = 0
+        success_count = 0
+        
+        # Delete folders
+        for folder in self.folders:
+            try:
+                self.item_progress.emit(f"Deleting folder: {os.path.basename(folder)}")
+                shutil.rmtree(folder)
+                logger.info(f"Deleted folder: {folder}")
+                success_count += 1
+            except Exception as e:
+                logger.error(f"Failed to delete folder {folder}: {e}")
+                self.failed_items.append(f"{folder}: {str(e)}")
+            
+            current_item += 1
+            self.progress.emit(current_item, total_items)
+        
+        # Delete shortcuts
+        for shortcut in self.shortcuts:
+            try:
+                self.item_progress.emit(f"Deleting shortcut: {os.path.basename(shortcut)}")
+                os.remove(shortcut)
+                logger.info(f"Deleted shortcut: {shortcut}")
+                success_count += 1
+            except Exception as e:
+                logger.error(f"Failed to delete shortcut {shortcut}: {e}")
+                self.failed_items.append(f"{os.path.basename(shortcut)}: {str(e)}")
+            
+            current_item += 1
+            self.progress.emit(current_item, total_items)
+        
+        # Build result message
+        if self.failed_items:
+            error_list = "\n".join(self.failed_items)
+            message = f"Cleaned {success_count} item(s) successfully.\n\nFailed to delete:\n{error_list}"
+            self.finished.emit(False, message, success_count)
+        else:
+            message = f"Successfully cleaned {success_count} item(s)."
+            self.finished.emit(True, message, success_count)
+
 
 class MainWindow(QtWidgets.QWidget):
     download_finished = QtCore.Signal(bool, str)  # success, message
 
     def __init__(self):
         super().__init__()
+        logger.info("Initializing MainWindow")
         self.setWindowTitle("PSA-DIAG FREE")
         self.setWindowFlags(QtCore.Qt.WindowType.FramelessWindowHint)
+        self.setAttribute(QtCore.Qt.WidgetAttribute.WA_TranslucentBackground)
         self.resize(900, 420)
 
         # Download variables
         self.download_folder = "C:\\INSTALL\\"
-        self.last_version = ""
+        self.last_version_diagbox = ""
         self.diagbox_path = ""
         self.auto_install = None
         self.download_thread = None
@@ -264,31 +412,39 @@ class MainWindow(QtWidgets.QWidget):
         self.cancel_button = None
         self.pause_button = None
         self.dragPos = QtCore.QPoint()
+        self.log_widget = None
+        self.log_handler = None
         
         # Fetch last version first
-        self.fetch_last_version()
+        logger.info("Fetching last Diagbox version...")
+        self.fetch_last_version_diagbox()
         
         # Version options: (display_name, version, url)
         self.version_options = [
-            (f"Diagbox {self.last_version} (Latest)", self.last_version, f"https://archive.batocera.org/recalbox.remix_old_website/web/composer/Diagbox_Install_{self.last_version}.7z"),
-            ("Diagbox 9.85", "9.85", "https://archive.batocera.org/recalbox.remix_old_website/web/composer/Diagbox_Install_9.85.7z")
+            (f"Diagbox {self.last_version_diagbox} (Latest)", self.last_version_diagbox, f"https://archive.org/download/psa-diag.fr/Diagbox_Install_{self.last_version_diagbox}.7z"),
+            ("Diagbox 9.85", "9.85", "https://archive.org/download/psa-diag.fr/Diagbox_Install_9.85.7z")
         ]
 
         # Connect signals
         self.download_finished.connect(self.on_download_finished)
 
         self.setup_ui()
+        
+        # Check for app updates after UI is ready
+        QtCore.QTimer.singleShot(1000, self.check_app_update)
 
     def update_progress(self, value, speed, eta):
-        bar = self.stack.currentWidget().findChild(QtWidgets.QProgressBar)
-        if bar:
-            bar.setValue(value)
-            bar.setFormat(f"{value / 10:.1f}% - {speed:.1f} MB/s - {eta}")
-            bar.repaint()
-            QtWidgets.QApplication.processEvents()
+        # Update footer progress bar
+        if hasattr(self, 'footer_progress'):
+            self.footer_progress.setValue(value)
+            self.footer_progress.setFormat(f"{value / 10:.1f}% - {speed:.1f} MB/s - {eta}")
+        if hasattr(self, 'footer_label'):
+            self.footer_label.setText("Downloading Diagbox...")
+        
+        QtWidgets.QApplication.processEvents()
 
     def on_download_finished(self, success, message):
-        QtWidgets.QMessageBox.information(self, "Download", message)
+        logger.info(f"Download finished: success={success}, message={message}")
         
         # Hide cancel and pause buttons
         if self.cancel_button:
@@ -297,19 +453,29 @@ class MainWindow(QtWidgets.QWidget):
             self.pause_button.setVisible(False)
             self.pause_button.setText("Pause")
         
-        # Re-enable all buttons and combo box
-        self.set_buttons_enabled(True)
+        # Update footer
+        if hasattr(self, 'footer_progress'):
+            self.footer_progress.setRange(0, 1000)
+            self.footer_progress.setValue(1000 if success else 0)
+            self.footer_progress.setFormat("Download Complete" if success else "Download Failed")
+        if hasattr(self, 'footer_label'):
+            self.footer_label.setText("Download complete" if success else "Download failed")
         
-        bar = self.stack.currentWidget().findChild(QtWidgets.QProgressBar)
-        if bar:
-            bar.setRange(0, 1000)
-            bar.setValue(1000 if success else 0)
-            if success:
-                bar.setFormat("100.0% - Download Complete")
-            else:
-                bar.setFormat("0.0% - Download Failed")
+        # Check if auto-install is enabled
         if success and self.auto_install and self.auto_install.isChecked():
-            self.install_diagbox()
+            logger.info("Auto-install enabled, starting installation...")
+            # Don't show download completion message, go directly to install
+            QtCore.QTimer.singleShot(500, self.install_diagbox)
+        else:
+            # Re-enable all buttons and combo box only if not auto-installing
+            self.set_buttons_enabled(True)
+            QtWidgets.QMessageBox.information(self, "Download", message)
+            # Reset footer after message
+            if hasattr(self, 'footer_label'):
+                self.footer_label.setText("Ready")
+            if hasattr(self, 'footer_progress'):
+                self.footer_progress.setValue(0)
+                self.footer_progress.setFormat("")
 
     def check_installed_version(self):
         version_file = r"C:\AWRoot\bin\fi\Version.ini"
@@ -324,6 +490,67 @@ class MainWindow(QtWidgets.QWidget):
             except:
                 pass
         return None
+
+    def get_diagbox_language(self):
+        """Get current Diagbox language"""
+        lang_file = r"C:\AWRoot\dtrd\Trans\Language.ini"
+        if os.path.exists(lang_file):
+            try:
+                with open(lang_file, 'r') as f:
+                    content = f.read()
+                    for line in content.splitlines():
+                        if '=' in line:
+                            return line.split('=', 1)[1].strip()
+            except Exception as e:
+                logger.error(f"Error reading language file: {e}")
+        return None
+
+    def change_diagbox_language(self, new_lang_code):
+        """Change Diagbox language"""
+        lang_file = r"C:\AWRoot\dtrd\Trans\Language.ini"
+        
+        if not os.path.exists(lang_file):
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Change Language",
+                f"Language file not found.\n\nExpected location:\n{lang_file}\n\nPlease install Diagbox first."
+            )
+            return
+        
+        try:
+            logger.info(f"Changing Diagbox language to: {new_lang_code}")
+            
+            # Read current content
+            with open(lang_file, 'r') as f:
+                content = f.read()
+            
+            # Replace language
+            lines = content.splitlines()
+            new_lines = []
+            for line in lines:
+                if '=' in line:
+                    key = line.split('=')[0]
+                    new_lines.append(f"{key}={new_lang_code}")
+                else:
+                    new_lines.append(line)
+            
+            # Write back
+            with open(lang_file, 'w') as f:
+                f.write('\n'.join(new_lines))
+            
+            logger.info(f"Language changed successfully to {new_lang_code}")
+            QtWidgets.QMessageBox.information(
+                self,
+                "Change Language",
+                f"Language changed to {new_lang_code}\n\nPlease restart Diagbox for changes to take effect."
+            )
+        except Exception as e:
+            logger.error(f"Failed to change language: {e}", exc_info=True)
+            QtWidgets.QMessageBox.critical(
+                self,
+                "Change Language",
+                f"Failed to change language:\n\n{str(e)}"
+            )
 
     def check_downloaded_versions(self):
         """Check what versions are available in the download folder"""
@@ -376,47 +603,100 @@ class MainWindow(QtWidgets.QWidget):
                     self.pause_button.setText("Resume")
 
     def on_install_finished(self, success, message, install_button, bar):
-        QtWidgets.QMessageBox.information(self, "Install", message)
-        
-        # Re-enable all buttons and combo box
+        # Re-enable all buttons and combo box FIRST
         self.set_buttons_enabled(True)
         
-        if bar:
-            bar.setRange(0, 100)
-            bar.setValue(100 if success else 0)
-            bar.setFormat("Installation complete" if success else "Installation failed")
+        # Update footer
+        if hasattr(self, 'footer_progress'):
+            self.footer_progress.setRange(0, 100)
+            self.footer_progress.setValue(100 if success else 0)
+            self.footer_progress.setFormat("Installation complete" if success else "Installation failed")
+        if hasattr(self, 'footer_label'):
+            self.footer_label.setText("Installation complete" if success else "Installation failed")
+        
+        # Refresh install page if installation was successful
+        if success:
+            self.refresh_install_page()
+        
+        # Show message box AFTER re-enabling buttons
+        QtWidgets.QMessageBox.information(self, "Install", message)
+        
+        # Reset footer after a delay
+        QtCore.QTimer.singleShot(3000, self.reset_footer)
+    
+    def reset_footer(self):
+        """Reset footer to ready state"""
+        if hasattr(self, 'footer_label'):
+            self.footer_label.setText("Ready")
+        if hasattr(self, 'footer_progress'):
+            self.footer_progress.setValue(0)
+            self.footer_progress.setFormat("")
+    
+    def refresh_install_page(self):
+        """Refresh the install page to update version information"""
+        # Update installed version label
+        if hasattr(self, 'header_installed'):
+            installed_version = self.check_installed_version()
+            version_text = installed_version if installed_version else "Not installed"
+            self.header_installed.setText(f"Installed Version : {version_text}")
+        
+        # Update downloaded versions label
+        downloaded_versions = self.check_downloaded_versions()
+        if downloaded_versions:
+            downloaded_text = ", ".join([f"{v['version']} ({v['size_mb']:.1f} MB)" for v in downloaded_versions])
+            if hasattr(self, 'header_downloaded') and self.header_downloaded:
+                self.header_downloaded.setText(f"Downloaded : {downloaded_text}")
+                self.header_downloaded.setVisible(True)
+            else:
+                # Create downloaded label if it doesn't exist
+                install_page = self.stack.widget(0)  # Install page is first (index 0)
+                if install_page:
+                    layout = install_page.layout()
+                    self.header_downloaded = QtWidgets.QLabel(f"Downloaded : {downloaded_text}")
+                    self.header_downloaded.setObjectName("sectionHeader")
+                    self.header_downloaded.setStyleSheet("color: #5cb85c;")
+                    layout.insertWidget(2, self.header_downloaded)  # Insert after installed and online version
+        else:
+            # Hide downloaded label if no files exist
+            if hasattr(self, 'header_downloaded') and self.header_downloaded:
+                self.header_downloaded.setVisible(False)
 
     def update_install_progress(self, value):
         """Update installation progress bar"""
-        bar = self.stack.currentWidget().findChild(QtWidgets.QProgressBar)
-        if bar:
-            bar.setValue(value)
-            bar.setFormat(f"Extracting... {value}%")
-            bar.repaint()
-            QtWidgets.QApplication.processEvents()
+        # Update footer progress bar
+        if hasattr(self, 'footer_progress'):
+            self.footer_progress.setRange(0, 100)
+            self.footer_progress.setValue(value)
+            self.footer_progress.setFormat(f"Extracting... {value}%")
+        if hasattr(self, 'footer_label'):
+            self.footer_label.setText("Installing Diagbox...")
+        
+        QtWidgets.QApplication.processEvents()
     
     def update_install_file(self, filename):
         """Update current file being extracted"""
-        if hasattr(self, 'file_label'):
-            # Truncate filename if too long
-            if len(filename) > 80:
-                filename = "..." + filename[-77:]
-            self.file_label.setText(filename)
-            self.file_label.repaint()
-            QtWidgets.QApplication.processEvents()
+        # Update footer label with truncated filename
+        if hasattr(self, 'footer_label'):
+            display_name = filename if len(filename) <= 60 else "..." + filename[-57:]
+            self.footer_label.setText(f"Installing: {display_name}")
+        
+        QtWidgets.QApplication.processEvents()
 
     def install_diagbox(self):
+        logger.info("Install Diagbox initiated")
         # Get selected version from combo box
         if hasattr(self, 'version_combo'):
             selected_data = self.version_combo.currentData()
             if selected_data:
                 version, url = selected_data
-                self.last_version = version
+                self.last_version_diagbox = version
                 self.diagbox_path = os.path.join(self.download_folder, f"Diagbox_Install_{version}.7z")
+                logger.info(f"Installing version: {version}, path: {self.diagbox_path}")
         
         if not os.path.exists(self.diagbox_path):
+            logger.error(f"Diagbox file not found: {self.diagbox_path}")
             # Get the version being attempted
-            version = self.last_version if self.last_version else "Unknown"
+            version = self.last_version_diagbox if self.last_version_diagbox else "Unknown"
             QtWidgets.QMessageBox.warning(
                 self, 
                 "Install", 
@@ -437,21 +717,16 @@ class MainWindow(QtWidgets.QWidget):
                 install_button = child
                 break
         
-        # Set progress bar to extracting
-        bar = self.stack.currentWidget().findChild(QtWidgets.QProgressBar)
-        if bar:
-            bar.setRange(0, 100)
-            bar.setValue(0)
-            bar.setFormat("Extracting... 0%")
         # Start installation in thread
         self.install_thread = InstallThread(self.diagbox_path)
         self.install_thread.progress.connect(self.update_install_progress)
         self.install_thread.file_progress.connect(self.update_install_file)
-        self.install_thread.finished.connect(lambda success, message: self.on_install_finished(success, message, install_button, bar))
+        self.install_thread.finished.connect(lambda success, message: self.on_install_finished(success, message, install_button, None))
         self.install_thread.start()
 
     def clean_diagbox(self):
         """Clean Diagbox installation by removing C:\\APP, C:\\AWRoot, and C:\\APPLIC folders"""
+        logger.info("Clean Diagbox initiated")
         # Check which folders exist
         folders_to_delete = []
         folders = [r"C:\APP", r"C:\AWRoot", r"C:\APPLIC"]
@@ -460,20 +735,45 @@ class MainWindow(QtWidgets.QWidget):
             if os.path.exists(folder):
                 folders_to_delete.append(folder)
         
-        if not folders_to_delete:
+        # Check for desktop shortcuts
+        shortcuts_to_delete = []
+        public_desktop = r"C:\Users\Public\Desktop"
+        shortcut_names = [
+            "Diagbox Language Changer.lnk",
+            "Diagbox.lnk",
+            "PSA Interface Checker.lnk",
+            "Terminate Diagbox Processes.lnk"
+        ]
+        
+        for shortcut in shortcut_names:
+            shortcut_path = os.path.join(public_desktop, shortcut)
+            if os.path.exists(shortcut_path):
+                shortcuts_to_delete.append(shortcut_path)
+        
+        if not folders_to_delete and not shortcuts_to_delete:
             QtWidgets.QMessageBox.information(
                 self,
                 "Clean Diagbox",
-                "No Diagbox folders found to clean.\n\nFolders checked:\n- C:\\APP\n- C:\\AWRoot\n- C:\\APPLIC"
+                "No Diagbox folders or shortcuts found to clean.\n\nFolders checked:\n- C:\\APP\n- C:\\AWRoot\n- C:\\APPLIC\n\nShortcuts checked:\n- Public Desktop shortcuts"
             )
             return
         
         # Confirm deletion
-        folder_list = "\n".join([f"- {folder}" for folder in folders_to_delete])
+        items_list = []
+        if folders_to_delete:
+            items_list.append("Folders:")
+            items_list.extend([f"- {folder}" for folder in folders_to_delete])
+        if shortcuts_to_delete:
+            if items_list:
+                items_list.append("")
+            items_list.append("Shortcuts:")
+            items_list.extend([f"- {os.path.basename(s)}" for s in shortcuts_to_delete])
+        
+        items_text = "\n".join(items_list)
         reply = QtWidgets.QMessageBox.question(
             self,
             "Clean Diagbox",
-            f"This will permanently delete the following folders:\n\n{folder_list}\n\nAre you sure?",
+            f"This will permanently delete the following items:\n\n{items_text}\n\nAre you sure?",
             QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No,
             QtWidgets.QMessageBox.StandardButton.No
         )
@@ -487,41 +787,63 @@ class MainWindow(QtWidgets.QWidget):
         # Kill all Diagbox processes before cleaning
         self.kill_diagbox_processes_silent()
         
-        # Delete folders
-        success_count = 0
-        failed_folders = []
+        # Initialize footer progress
+        total_items = len(folders_to_delete) + len(shortcuts_to_delete)
+        if hasattr(self, 'footer_progress'):
+            self.footer_progress.setRange(0, total_items)
+            self.footer_progress.setValue(0)
+        if hasattr(self, 'footer_label'):
+            self.footer_label.setText("Cleaning Diagbox...")
         
-        for folder in folders_to_delete:
-            try:
-                shutil.rmtree(folder)
-                success_count += 1
-            except Exception as e:
-                failed_folders.append(f"{folder}: {str(e)}")
-        
+        # Start cleaning in thread
+        self.clean_thread = CleanThread(folders_to_delete, shortcuts_to_delete)
+        self.clean_thread.progress.connect(self.update_clean_progress)
+        self.clean_thread.item_progress.connect(self.update_clean_item)
+        self.clean_thread.finished.connect(self.on_clean_finished)
+        self.clean_thread.start()
+    
+    def update_clean_progress(self, current, total):
+        """Update clean progress bar"""
+        if hasattr(self, 'footer_progress'):
+            self.footer_progress.setValue(current)
+    
+    def update_clean_item(self, item_name):
+        """Update current item being cleaned"""
+        if hasattr(self, 'footer_label'):
+            self.footer_label.setText(item_name)
+    
+    def on_clean_finished(self, success, message, success_count):
+        """Called when cleaning is finished"""
         # Re-enable buttons
         self.set_buttons_enabled(True)
         
+        # Update footer to show completion
+        if hasattr(self, 'footer_label'):
+            self.footer_label.setText("Clean complete")
+        if hasattr(self, 'footer_progress'):
+            total_items = self.footer_progress.maximum()
+            self.footer_progress.setValue(total_items)
+        
+        # Refresh install page
+        self.refresh_install_page()
+        
         # Show result
-        if failed_folders:
-            error_list = "\n".join(failed_folders)
-            QtWidgets.QMessageBox.warning(
-                self,
-                "Clean Diagbox",
-                f"Cleaned {success_count} folder(s) successfully.\n\nFailed to delete:\n{error_list}"
-            )
+        if success:
+            QtWidgets.QMessageBox.information(self, "Clean Diagbox", message)
         else:
-            QtWidgets.QMessageBox.information(
-                self,
-                "Clean Diagbox",
-                f"Successfully cleaned {success_count} Diagbox folder(s)."
-            )
+            QtWidgets.QMessageBox.warning(self, "Clean Diagbox", message)
+        
+        # Reset footer after a delay
+        QtCore.QTimer.singleShot(3000, self.reset_footer)
 
     def install_vci_driver(self):
         """Install VCI Driver using ACTIAPnPInstaller.exe"""
+        logger.info("Install VCI Driver initiated")
         driver_path = r"C:\AWRoot\extra\Drivers\xsevo\ACTIAPnPInstaller.exe"
         
         # Check if the installer exists
         if not os.path.exists(driver_path):
+            logger.error(f"VCI Driver installer not found: {driver_path}")
             QtWidgets.QMessageBox.warning(
                 self,
                 "Install VCI Driver",
@@ -560,10 +882,12 @@ class MainWindow(QtWidgets.QWidget):
 
     def launch_diagbox(self):
         """Launch Diagbox application"""
+        logger.info("Launch Diagbox initiated")
         diagbox_exe = r"C:\AWRoot\bin\launcher\Diagbox.exe"
         
         # Check if Diagbox.exe exists
         if not os.path.exists(diagbox_exe):
+            logger.error(f"Diagbox.exe not found: {diagbox_exe}")
             QtWidgets.QMessageBox.warning(
                 self,
                 "Launch Diagbox",
@@ -688,36 +1012,87 @@ class MainWindow(QtWidgets.QWidget):
                 f"Error while trying to kill processes:\n\n{str(e)}"
             )
 
-    def fetch_last_version(self):
+    def on_language_changed(self):
+        """Handle language change from combo box"""
+        lang_code = self.language_combo.currentData()
+        if lang_code:
+            self.change_diagbox_language(lang_code)
+
+    def fetch_last_version_diagbox(self):
         try:
-            response = requests.get("https://archive.batocera.org/recalbox.remix_old_website/web/composer/last_version.txt")
+            logger.info(f"Fetching last version from: {URL_LAST_VERSION_DIAGBOX}")
+            response = requests.get(URL_LAST_VERSION_DIAGBOX)
             response.raise_for_status()
-            self.last_version = response.text.strip()
-            self.diagbox_path = os.path.join(self.download_folder, f"Diagbox_Install_{self.last_version}.7z")
+            data = response.json()
+            self.last_version_diagbox = data.get('version', '')
+            logger.info(f"Last Diagbox version: {self.last_version_diagbox}")
+            self.diagbox_path = os.path.join(self.download_folder, f"Diagbox_Install_{self.last_version_diagbox}.7z")
         except Exception as e:
+            logger.error(f"Failed to fetch last version: {e}", exc_info=True)
             QtWidgets.QMessageBox.warning(self, "Error", f"Failed to fetch last version: {e}")
 
+    def check_app_update(self):
+        """Check if a newer version of PSA-DIAG is available"""
+        try:
+            logger.info("Checking for app updates...")
+            response = requests.get(URL_LAST_VERSION_PSADIAG, timeout=5)
+            response.raise_for_status()
+            data = response.json()
+            latest_version = data.get('version', '')
+            logger.info(f"Latest app version: {latest_version}, Current: {APP_VERSION}")
+            
+            if latest_version and latest_version != APP_VERSION:
+                # Compare versions (simple string comparison, assumes format like "2.0.0.0")
+                current_parts = [int(x) for x in APP_VERSION.split('.')]
+                latest_parts = [int(x) for x in latest_version.split('.')]
+                
+                # Check if latest is newer
+                if latest_parts > current_parts:
+                    logger.info("New version available, showing update dialog")
+                    reply = QtWidgets.QMessageBox.question(
+                        self,
+                        "Update Available",
+                        f"A new version of PSA-DIAG is available!\n\n"
+                        f"Current version: {APP_VERSION}\n"
+                        f"Latest version: {latest_version}\n\n"
+                        f"Do you want to download it?",
+                        QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No,
+                        QtWidgets.QMessageBox.StandardButton.Yes
+                    )
+                    
+                    if reply == QtWidgets.QMessageBox.StandardButton.Yes:
+                        logger.info("User accepted update, opening download page")
+                        import webbrowser
+                        webbrowser.open("https://www.psa-diag.fr/diagbox/psa_diag.php")
+                else:
+                    logger.info("App is up to date")
+        except Exception as e:
+            # Silently fail if update check fails (no internet, server down, etc.)
+            logger.warning(f"Update check failed: {e}")
+
     def download_diagbox(self):
+        logger.info("Download Diagbox button clicked")
         # Get selected version from combo box
         if hasattr(self, 'version_combo'):
             selected_data = self.version_combo.currentData()
             if selected_data:
                 version, url = selected_data
-                self.last_version = version
+                self.last_version_diagbox = version
+                logger.info(f"Selected version: {version}")
             else:
-                if not self.last_version:
-                    self.fetch_last_version()
-                if not self.last_version:
+                if not self.last_version_diagbox:
+                    self.fetch_last_version_diagbox()
+                if not self.last_version_diagbox:
                     return
-                url = f"https://archive.batocera.org/recalbox.remix_old_website/web/composer/Diagbox_Install_{self.last_version}.7z"
+                url = f"https://archive.org/download/psa-diag.fr/Diagbox_Install_{self.last_version_diagbox}.7z"
         else:
-            if not self.last_version:
-                self.fetch_last_version()
-            if not self.last_version:
+            if not self.last_version_diagbox:
+                self.fetch_last_version_diagbox()
+            if not self.last_version_diagbox:
                 return
-            url = f"https://archive.batocera.org/recalbox.remix_old_website/web/composer/Diagbox_Install_{self.last_version}.7z"
+            url = f"https://archive.org/download/psa-diag.fr/Diagbox_Install_{self.last_version_diagbox}.7z"
         
-        self.diagbox_path = os.path.join(self.download_folder, f"Diagbox_Install_{self.last_version}.7z")
+        self.diagbox_path = os.path.join(self.download_folder, f"Diagbox_Install_{self.last_version_diagbox}.7z")
         
         if not os.path.exists(self.download_folder):
             os.makedirs(self.download_folder)
@@ -726,15 +1101,18 @@ class MainWindow(QtWidgets.QWidget):
         
         # Get total size for progress
         try:
-            head = requests.head(url)
+            # Follow redirects to get actual file size
+            head = requests.head(url, allow_redirects=True, timeout=10)
             total_size = int(head.headers.get('content-length', 0))
-        except:
+            logger.info(f"File size from HEAD request: {total_size / (1024*1024):.2f} MB")
+        except Exception as e:
+            logger.warning(f"Could not get file size from HEAD request: {e}")
             total_size = 0
         
         # Check if file already exists and size matches
         if os.path.exists(file_path):
             if total_size > 0 and os.path.getsize(file_path) == total_size:
-                QtWidgets.QMessageBox.information(self, "Download", f"Diagbox {self.last_version} already downloaded.")
+                QtWidgets.QMessageBox.information(self, "Download", f"Diagbox {self.last_version_diagbox} already downloaded.")
                 return
             else:
                 # File exists but size doesn't match, delete it
@@ -759,7 +1137,7 @@ class MainWindow(QtWidgets.QWidget):
                 bar.setFormat("0.0% - 0.0 MB/s - --:--")
             else:
                 bar.setRange(0, 0)  # indeterminate
-        self.download_thread = DownloadThread(url, file_path, self.last_version, total_size)
+        self.download_thread = DownloadThread(url, file_path, self.last_version_diagbox, total_size)
         self.download_thread.progress.connect(self.update_progress)
         self.download_thread.finished.connect(self.on_download_finished)
         self.download_thread.start()
@@ -772,10 +1150,10 @@ class MainWindow(QtWidgets.QWidget):
         # Sidebar
         sidebar = QtWidgets.QFrame()
         sidebar.setObjectName("sidebar")
-        sidebar.setFixedWidth(84)
+        sidebar.setFixedWidth(110)
         vbox = QtWidgets.QVBoxLayout(sidebar)
-        vbox.setContentsMargins(10,10,10,10)
-        vbox.setSpacing(12)
+        vbox.setContentsMargins(12,12,12,12)
+        vbox.setSpacing(14)
 
         # Title in sidebar
         title_sidebar = QtWidgets.QLabel("PSA-DIAG FREE")
@@ -829,6 +1207,30 @@ class MainWindow(QtWidgets.QWidget):
         self.stack.addWidget(self.page_about())
 
         content_layout.addWidget(self.stack)
+        
+        # Footer with progress bar
+        self.footer = QtWidgets.QFrame()
+        self.footer.setObjectName("footer")
+        self.footer.setFixedHeight(60)
+        footer_layout = QtWidgets.QVBoxLayout(self.footer)
+        footer_layout.setContentsMargins(10, 8, 10, 8)
+        footer_layout.setSpacing(4)
+        
+        # Progress label
+        self.footer_label = QtWidgets.QLabel("Ready")
+        self.footer_label.setStyleSheet("color: #b0b0b0; font-size: 11px;")
+        footer_layout.addWidget(self.footer_label)
+        
+        # Progress bar
+        self.footer_progress = QtWidgets.QProgressBar()
+        self.footer_progress.setRange(0, 1000)
+        self.footer_progress.setValue(0)
+        self.footer_progress.setTextVisible(True)
+        self.footer_progress.setFormat("")
+        self.footer_progress.setFixedHeight(20)
+        footer_layout.addWidget(self.footer_progress)
+        
+        content_layout.addWidget(self.footer)
 
         main_layout.addWidget(sidebar)
         main_layout.addWidget(content, 1)
@@ -939,16 +1341,16 @@ class MainWindow(QtWidgets.QWidget):
         layout.setSpacing(10)
 
         # Fetch online version if not already
-        if not self.last_version:
-            self.fetch_last_version()
+        if not self.last_version_diagbox:
+            self.fetch_last_version_diagbox()
 
         installed_version = self.check_installed_version()
         version_text = installed_version if installed_version else "Not installed"
-        header_installed = QtWidgets.QLabel(f"Installed Version : {version_text}")
-        header_installed.setObjectName("sectionHeader")
-        layout.addWidget(header_installed)
+        self.header_installed = QtWidgets.QLabel(f"Installed Version : {version_text}")
+        self.header_installed.setObjectName("sectionHeader")
+        layout.addWidget(self.header_installed)
 
-        header_online = QtWidgets.QLabel(f"Online Version : {self.last_version if self.last_version else 'Unknown'}")
+        header_online = QtWidgets.QLabel(f"Last Version : {self.last_version_diagbox if self.last_version_diagbox else 'Unknown'}")
         header_online.setObjectName("sectionHeader")
         layout.addWidget(header_online)
 
@@ -956,10 +1358,12 @@ class MainWindow(QtWidgets.QWidget):
         downloaded_versions = self.check_downloaded_versions()
         if downloaded_versions:
             downloaded_text = ", ".join([f"{v['version']} ({v['size_mb']:.1f} MB)" for v in downloaded_versions])
-            header_downloaded = QtWidgets.QLabel(f"Downloaded : {downloaded_text}")
-            header_downloaded.setObjectName("sectionHeader")
-            header_downloaded.setStyleSheet("color: #5cb85c;")
-            layout.addWidget(header_downloaded)
+            self.header_downloaded = QtWidgets.QLabel(f"Downloaded : {downloaded_text}")
+            self.header_downloaded.setObjectName("sectionHeader")
+            self.header_downloaded.setStyleSheet("color: #5cb85c;")
+            layout.addWidget(self.header_downloaded)
+        else:
+            self.header_downloaded = None
 
         sub = QtWidgets.QHBoxLayout()
         left = QtWidgets.QVBoxLayout()
@@ -986,6 +1390,53 @@ class MainWindow(QtWidgets.QWidget):
         h.addWidget(toggle)
         h.addStretch()
         right.addLayout(h)
+
+        # Language selection
+        lang_layout = QtWidgets.QHBoxLayout()
+        lang_label = QtWidgets.QLabel("Diagbox Language :")
+        self.language_combo = QtWidgets.QComboBox()
+        
+        # Language options: (display_name, lang_code)
+        languages = [
+            ("English", "en_GB"),
+            ("Français", "fr_FR"),
+            ("Italiano", "it_IT"),
+            ("Nederlands", "nl_NL"),
+            ("Polski", "pl_PL"),
+            ("Português", "pt_PT"),
+            ("Russian", "ru_RU"),
+            ("Türkçe", "tr_TR"),
+            ("Svenska", "sv_SE"),
+            ("Dansk", "da_DK"),
+            ("Čeština", "cs_CZ"),
+            ("Deutsch", "de_DE"),
+            ("Greek", "el_GR"),
+            ("Hrvatski", "hr_HR"),
+            ("Chinese", "zh_CN"),
+            ("Japanese", "ja_JP"),
+            ("Español", "es_ES"),
+            ("Slovenščina", "sl_SI"),
+            ("Hungarian", "hu_HU"),
+            ("Suomi", "fi_FI"),
+        ]
+        
+        for display_name, lang_code in languages:
+            self.language_combo.addItem(display_name, userData=lang_code)
+        
+        # Set current language if available
+        current_lang = self.get_diagbox_language()
+        if current_lang:
+            for i in range(self.language_combo.count()):
+                if self.language_combo.itemData(i) == current_lang:
+                    self.language_combo.setCurrentIndex(i)
+                    break
+        
+        self.language_combo.setMinimumWidth(150)
+        self.language_combo.currentIndexChanged.connect(self.on_language_changed)
+        lang_layout.addWidget(lang_label)
+        lang_layout.addWidget(self.language_combo)
+        lang_layout.addStretch()
+        right.addLayout(lang_layout)
 
         # Buttons grid
         grid = QtWidgets.QGridLayout()
@@ -1039,34 +1490,29 @@ class MainWindow(QtWidgets.QWidget):
         buttons_row.addWidget(self.cancel_button)
         
         right.addLayout(buttons_row)
-
-        # Progress bar
-        pb = QtWidgets.QProgressBar()
-        pb.setValue(0)
-        pb.setTextVisible(True)
-        
-        # Label for current file being extracted
-        self.file_label = QtWidgets.QLabel("")
-        self.file_label.setStyleSheet("color: #888; font-size: 11px;")
-        self.file_label.setWordWrap(False)
         
         layout.addLayout(sub)
         layout.addLayout(right)
-        layout.addWidget(pb)
-        layout.addWidget(self.file_label)
 
         return w
 
     def page_update(self):
         w = QtWidgets.QWidget()
         layout = QtWidgets.QVBoxLayout(w)
-        layout.addWidget(QtWidgets.QLabel("Update / Refresh (placeholder)"))
+        layout.addWidget(QtWidgets.QLabel("Update / Refresh (Not available)"))
         layout.addStretch()
         return w
 
     def page_about(self):
         w = QtWidgets.QWidget()
         layout = QtWidgets.QVBoxLayout(w)
+        layout.setSpacing(10)
+        
+        # Top section with logo and version
+        top_section = QtWidgets.QWidget()
+        top_layout = QtWidgets.QHBoxLayout(top_section)
+        top_layout.setContentsMargins(0, 0, 0, 0)
+        
         logo = QtWidgets.QLabel()
         pix = QtGui.QPixmap(str(BASE / "icons" / "logo.png"))
         if not pix.isNull():
@@ -1074,12 +1520,62 @@ class MainWindow(QtWidgets.QWidget):
             logo.setPixmap(pix)
         else:
             logo.setText("Logo non disponible")
-        layout.addWidget(logo, 0, QtCore.Qt.AlignmentFlag.AlignLeft)
-        layout.addWidget(QtWidgets.QLabel("PSA-DIAG FREE"))
-        layout.addWidget(QtWidgets.QLabel("Version: 1.0.0"))
-        layout.addWidget(QtWidgets.QLabel("Developed by Mike"))
+        top_layout.addWidget(logo)
+        
+        version_label = QtWidgets.QLabel(f"Version: {APP_VERSION}")
+        version_label.setStyleSheet("font-size: 14px;")
+        top_layout.addWidget(version_label)
+        top_layout.addStretch()
+        
+        layout.addWidget(top_section)
+        
+        # Toggle console button
+        self.toggle_log_btn = QtWidgets.QPushButton("Show Console")
+        self.toggle_log_btn.setObjectName("actionButton")
+        self.toggle_log_btn.setFixedHeight(44)
+        self.toggle_log_btn.clicked.connect(self.toggle_console)
+        layout.addWidget(self.toggle_log_btn)
+        
+        # Console widget (hidden by default)
+        self.log_widget = QtWidgets.QTextEdit()
+        self.log_widget.setReadOnly(True)
+        self.log_widget.setStyleSheet("""
+            QTextEdit {
+                background-color: #1e1e1e;
+                color: #d4d4d4;
+                font-family: 'Consolas', 'Courier New', monospace;
+                font-size: 11px;
+                border: 1px solid #3a3a3a;
+                border-radius: 4px;
+                padding: 8px;
+            }
+        """)
+        self.log_widget.setVisible(False)
+        self.log_widget.setMinimumHeight(200)
+        layout.addWidget(self.log_widget)
+        
+        # Add logging handler for this widget
+        self.log_handler = QTextEditLogger(self.log_widget)
+        self.log_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+        logger.addHandler(self.log_handler)
+        
         layout.addStretch()
         return w
+    
+    def toggle_console(self):
+        """Toggle console visibility"""
+        if self.log_widget:
+            is_visible = self.log_widget.isVisible()
+            self.log_widget.setVisible(not is_visible)
+            
+            if self.toggle_log_btn:
+                self.toggle_log_btn.setText("Hide Console" if not is_visible else "Show Console")
+            
+            # Adjust window height
+            if not is_visible:
+                self.resize(900, 650)  # Expanded height
+            else:
+                self.resize(900, 420)  # Original height
     def mousePressEvent(self, event):
         if event.button() == QtCore.Qt.MouseButton.LeftButton:
             # Check if click is on a widget that should not trigger window drag
@@ -1091,6 +1587,8 @@ class MainWindow(QtWidgets.QWidget):
                     if isinstance(current, (QtWidgets.QComboBox, QtWidgets.QPushButton, 
                                           QtWidgets.QCheckBox, QtWidgets.QProgressBar,
                                           QtWidgets.QLineEdit, QtWidgets.QAbstractItemView)):
+                        self.dragPos = None  # Disable dragging for interactive widgets
+                        event.ignore()
                         return
                     current = current.parent()
             
@@ -1099,11 +1597,25 @@ class MainWindow(QtWidgets.QWidget):
 
     def mouseMoveEvent(self, event):
         if event.buttons() == QtCore.Qt.MouseButton.LeftButton:
-            if hasattr(self, 'dragPos'):
-                delta = event.globalPosition().toPoint() - self.dragPos
-                self.move(self.pos() + delta)
-                self.dragPos = event.globalPosition().toPoint()
-                event.accept()
+            # Don't move if dragPos is None (clicked on interactive widget)
+            if not hasattr(self, 'dragPos') or self.dragPos is None:
+                return
+                
+            # Don't move window if a combo box popup is open
+            for combo in self.findChildren(QtWidgets.QComboBox):
+                if combo.view().isVisible():
+                    return
+            
+            delta = event.globalPosition().toPoint() - self.dragPos
+            self.move(self.pos() + delta)
+            self.dragPos = event.globalPosition().toPoint()
+            event.accept()
+    
+    def mouseReleaseEvent(self, event):
+        """Reset drag position on mouse release"""
+        if event.button() == QtCore.Qt.MouseButton.LeftButton:
+            self.dragPos = None
+            event.accept()
     
     def closeEvent(self, event):
         """Handle application close - stop any running processes"""
@@ -1121,16 +1633,23 @@ class MainWindow(QtWidgets.QWidget):
 
 
 if __name__ == "__main__":
+    # Hide console window first
+    hide_console()
+    
     # Check if running as admin, if not relaunch with admin privileges
     if not is_admin():
-        print("Not running as admin, requesting elevation...")
+        logger.warning("Not running as admin, requesting elevation...")
         if run_as_admin():
+            logger.info("Admin elevation requested, exiting current instance")
             sys.exit(0)  # Exit current instance
         else:
             # If elevation failed, continue anyway (user might have cancelled)
-            print("Continuing without admin privileges (some features may not work)")
+            logger.warning("Continuing without admin privileges (some features may not work)")
     
+    logger.info("Creating QApplication")
     app = QtWidgets.QApplication([])
+    logger.info("Creating MainWindow")
     win = MainWindow()
     win.show()
+    logger.info("Application started successfully")
     sys.exit(app.exec())
