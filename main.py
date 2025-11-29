@@ -25,7 +25,7 @@ else:
 # Persistent config directory (where we save preferences). Use APPDATA on Windows 
 CONFIG_DIR = Path(os.getenv('APPDATA', Path.home())) / 'PSA_DIAG'
 CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-APP_VERSION = "2.1.0.2"
+APP_VERSION = "2.1.0.3"
 URL_LAST_VERSION_PSADIAG = "https://psa-diag.fr/diagbox/install/last_version_psadiag.json"
 URL_LAST_VERSION_DIAGBOX = "https://psa-diag.fr/diagbox/install/last_version_diagbox.json"
 
@@ -583,12 +583,17 @@ class MainWindow(QtWidgets.QWidget):
         if os.path.exists(lang_file):
             try:
                 with open(lang_file, 'r') as f:
-                    content = f.read()
-                    for line in content.splitlines():
+                    for line in f:
                         if '=' in line:
-                            return line.split('=', 1)[1].strip()
+                            lang = line.split('=', 1)[1].strip()
+                            logger.info(f"Detected Diagbox language: {lang}")
+                            return lang
             except Exception as e:
                 logger.error(f"Error reading language file: {e}")
+        else:
+            logger.info(f"Diagbox language file not found: {lang_file}")
+
+        logger.info("No Diagbox language detected")
         return None
 
     def change_diagbox_language(self, new_lang_code):
@@ -825,6 +830,7 @@ class MainWindow(QtWidgets.QWidget):
             "Diagbox Language Changer.lnk",
             "Diagbox.lnk",
             "PSA Interface Checker.lnk",
+            "Terminate Diagbox Process.lnk"
             "Terminate Diagbox Processes.lnk"
         ]
         
@@ -1278,6 +1284,13 @@ class MainWindow(QtWidgets.QWidget):
         vbox.addStretch()
         vbox.addWidget(btn_info)
 
+        # Display app version under Info button in the sidebar
+        self.sidebar_version_label = QtWidgets.QLabel(translator.t('labels.version', version=APP_VERSION))
+        self.sidebar_version_label.setObjectName("sidebarVersion")
+        self.sidebar_version_label.setStyleSheet("font-size:11px; color: #b0b0b0;")
+        self.sidebar_version_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        vbox.addWidget(self.sidebar_version_label)
+
         # Title bar and content
         content = QtWidgets.QFrame()
         content.setObjectName("content")
@@ -1515,36 +1528,40 @@ class MainWindow(QtWidgets.QWidget):
         lang_layout = QtWidgets.QHBoxLayout()
         lang_label = QtWidgets.QLabel(translator.t('labels.diagbox_language'))
         self.language_combo = QtWidgets.QComboBox()
-        
-        # Language options: (display_name, lang_code)
-        languages = [
-            (translator.t('languages.en_GB'), "en_GB"),
-            (translator.t('languages.fr_FR'), "fr_FR"),
-            (translator.t('languages.it_IT'), "it_IT"),
-            (translator.t('languages.nl_NL'), "nl_NL"),
-            (translator.t('languages.pl_PL'), "pl_PL"),
-            (translator.t('languages.pt_PT'), "pt_PT"),
-            (translator.t('languages.ru_RU'), "ru_RU"),
-            (translator.t('languages.tr_TR'), "tr_TR"),
-            (translator.t('languages.sv_SE'), "sv_SE"),
-            (translator.t('languages.da_DK'), "da_DK"),
-            (translator.t('languages.cs_CZ'), "cs_CZ"),
-            (translator.t('languages.de_DE'), "de_DE"),
-            (translator.t('languages.el_GR'), "el_GR"),
-            (translator.t('languages.hr_HR'), "hr_HR"),
-            (translator.t('languages.zh_CN'), "zh_CN"),
-            (translator.t('languages.ja_JP'), "ja_JP"),
-            (translator.t('languages.es_ES'), "es_ES"),
-            (translator.t('languages.sl_SI'), "sl_SI"),
-            (translator.t('languages.hu_HU'), "hu_HU"),
-            (translator.t('languages.fi_FI'), "fi_FI"),
+
+        # Read current Diagbox language from file (if present) so we can
+        # ensure it's included and selected in the combo.
+        current_lang = self.get_diagbox_language()
+
+        # Default language codes in preferred order
+        default_codes = [
+            "en_GB", "fr_FR", "it_IT", "nl_NL", "pl_PL", "pt_PT",
+            "ru_RU", "tr_TR", "sv_SE", "da_DK", "cs_CZ", "de_DE",
+            "el_GR", "hr_HR", "zh_CN", "ja_JP", "es_ES", "sl_SI",
+            "hu_HU", "fi_FI",
         ]
-        
+
+        # Build languages list using translations; if a translation is missing
+        # fallback to the code string itself.
+        languages = []
+        for code in default_codes:
+            name = translator.t(f'languages.{code}')
+            # If translator returns the key back (missing), fallback to code
+            if name == f'languages.{code}':
+                name = code
+            languages.append((name, code))
+
+        # If current language exists and is not in defaults, insert it first
+        if current_lang and current_lang not in [c for (_, c) in languages]:
+            name = translator.t(f'languages.{current_lang}')
+            if name == f'languages.{current_lang}':
+                name = current_lang
+            languages.insert(0, (name, current_lang))
+
         for display_name, lang_code in languages:
             self.language_combo.addItem(display_name, userData=lang_code)
-        
-        # Set current language if available
-        current_lang = self.get_diagbox_language()
+
+        # Select current language if available
         if current_lang:
             for i in range(self.language_combo.count()):
                 if self.language_combo.itemData(i) == current_lang:

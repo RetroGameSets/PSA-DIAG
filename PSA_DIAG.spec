@@ -2,10 +2,18 @@
 
 block_cipher = None
 
+# Ensure PySide6 dynamic libraries and data files are collected so Qt DLLs
+# are bundled into the executable. This helps avoid "DLL load failed while
+# importing QtCore" errors on target machines.
+from PyInstaller.utils.hooks import collect_dynamic_libs, collect_data_files
+
+_pyside6_binaries = collect_dynamic_libs('PySide6') + collect_dynamic_libs('shiboken6')
+_pyside6_datas = collect_data_files('PySide6')
+
 a = Analysis(
     ['main.py'],
     pathex=[],
-    binaries=[],
+    binaries=_pyside6_binaries,
     datas=[
         ('style.qss', '.'),
         ('icons/*.svg', 'icons'),
@@ -13,7 +21,7 @@ a = Analysis(
         ('tools/7z.exe', 'tools'),
         ('lang/*.json', 'lang'),
         ('config/*.json', 'config'),
-    ],
+    ] + _pyside6_datas,
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},
