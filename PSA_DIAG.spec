@@ -12,7 +12,7 @@ a = Analysis(
         ('icons/*.png', 'icons'),
         ('tools/7z.exe', 'tools'),
         ('lang/*.json', 'lang'),
-        ('config/*.json), 'config'),
+        ('config/*.json', 'config'),
     ],
     hiddenimports=[],
     hookspath=[],
