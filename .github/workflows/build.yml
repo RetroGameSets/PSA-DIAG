@@ -3,84 +3,65 @@ name: Build PSA-DIAG
 on:
   push:
     tags:
-      - 'v*'  # Trigger on version tags like v1.0.0, v2.0.0.0, etc.
+      - 'v*'  # Trigger on version tags
+
+permissions:
+  contents: write
+  actions: read
+  pull-requests: write
 
 jobs:
   build:
-      permissions:
-      contents: read
-      actions: write
-      pull-requests: write
-      runs-on: windows-latest
-      
-      steps:
+    runs-on: windows-latest
+    steps:
       - name: Checkout code
+        uses: actions/checkout@v4
 
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
 
-        name: Build PSA-DIAG
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller
 
-        on:
-          push:
-            tags:
-              - 'v*'  # Trigger on version tags
+      - name: Build with PyInstaller
+        run: pyinstaller PSA_DIAG.spec
 
-        permissions:
-          contents: write
-          actions: read
-          pull-requests: write
+      - name: Get version from tag
+        id: get_version
+        run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+        shell: bash
 
-        jobs:
-          build:
-            runs-on: windows-latest
-            steps:
-              - name: Checkout code
-                uses: actions/checkout@v4
-
-              - name: Set up Python
-                uses: actions/setup-python@v5
-                with:
-                  python-version: '3.11'
-
-              - name: Install dependencies
-                run: |
-                  python -m pip install --upgrade pip
-                  pip install -r requirements.txt
-                  pip install pyinstaller
-
-              - name: Build with PyInstaller
-                run: pyinstaller PSA_DIAG.spec
-
-              - name: Get version from tag
-                id: get_version
-                run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
-                shell: bash
-
-              - name: Create Release
-                uses: actions/create-release@v1
-                env:
-                  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-                with:
-                  tag_name: ${{ github.ref }}
-                  release_name: PSA-DIAG ${{ steps.get_version.outputs.VERSION }}
-                  draft: false
-                  prerelease: false
-                  body: |
-                    ## PSA-DIAG ${{ steps.get_version.outputs.VERSION }}
+      - name: Create Release
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ github.ref }}
+          release_name: PSA-DIAG ${{ steps.get_version.outputs.VERSION }}
+          draft: false
+          prerelease: false
+          body: |
+            ## PSA-DIAG ${{ steps.get_version.outputs.VERSION }}
             
-                    ### Installation
-                    1. Download `PSA_DIAG.exe` below
-                    2. Run as Administrator
+            ### Installation
+            1. Download `PSA_DIAG.exe` below
+            2. Run as Administrator
             
-                    ### Changes
-                    - Automatic build from tag ${{ github.ref }}
-                    - Last commit: ${{ github.event.head_commit.message }}
+            ### Changes
+            - Automatic build from tag ${{ github.ref }}
+            - Last commit: ${{ github.event.head_commit.message }}
 
-              - name: Upload Release Asset
-                uses: actions/upload-release-asset@v1
-                env:
-                  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-                with:
-                  upload_url: ${{ steps.create_release.outputs.upload_url }}
-                  asset_path: ./dist/PSA_DIAG.exe
-                  asset_name: PSA_DIAG.exe
-                  asset_content_type: application/octet-stream
+      - name: Upload Release Asset
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: ./dist/PSA_DIAG.exe
+          asset_name: PSA_DIAG.exe
+          asset_content_type: application/octet-stream
