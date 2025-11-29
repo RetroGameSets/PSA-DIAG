@@ -103,7 +103,7 @@ class Translator:
 translator = Translator(Translator('en').load_language_preference())  # Load saved preference
 
 # Configure logging
-log_folder = Path("C:/INSTALL/logs")
+log_folder = BASE / "logs"
 log_folder.mkdir(parents=True, exist_ok=True)
 log_file = log_folder / f"psa_diag_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
 
@@ -1155,7 +1155,7 @@ class MainWindow(QtWidgets.QWidget):
                     if reply == QtWidgets.QMessageBox.StandardButton.Yes:
                         logger.info("User accepted update, opening download page")
                         import webbrowser
-                        webbrowser.open("https://www.psa-diag.fr/diagbox/psa_diag.php")
+                        webbrowser.open("https://github.com/RetroGameSets/PSA-DIAG/releases/latest")
                 else:
                     logger.info("App is up to date")
         except Exception as e:
