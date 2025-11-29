@@ -17,15 +17,94 @@ import ctypes
 import subprocess
 import logging
 from datetime import datetime
+import json
 
 BASE = Path(__file__).resolve().parent
-APP_VERSION = "2.0.0.0"
+APP_VERSION = "2.1.0.0"
 URL_LAST_VERSION_PSADIAG = "https://psa-diag.fr/diagbox/install/last_version_psadiag.json"
 URL_LAST_VERSION_DIAGBOX = "https://psa-diag.fr/diagbox/install/last_version_diagbox.json"
 
+# Translation system
+class Translator:
+    def __init__(self, language='en'):
+        self.language = language
+        self.translations = {}
+        self.load_translations()
+    
+    def load_translations(self):
+        """Load translation file for current language"""
+        lang_file = BASE / "lang" / f"{self.language}.json"
+        try:
+            if lang_file.exists():
+                with open(lang_file, 'r', encoding='utf-8') as f:
+                    self.translations = json.load(f)
+                # Logger may not be initialized yet during early import
+                if 'logger' in globals():
+                    logger.info(f"Loaded translations for language: {self.language}")
+            else:
+                if 'logger' in globals():
+                    logger.warning(f"Translation file not found: {lang_file}")
+        except Exception as e:
+            if 'logger' in globals():
+                logger.error(f"Error loading translations: {e}")
+    
+    def t(self, key, **kwargs):
+        """Translate a key with optional formatting parameters"""
+        keys = key.split('.')
+        value = self.translations
+        
+        for k in keys:
+            if isinstance(value, dict) and k in value:
+                value = value[k]
+            else:
+                if 'logger' in globals():
+                    logger.warning(f"Translation key not found: {key}")
+                return key
+        
+        # Format with kwargs if provided
+        if kwargs:
+            try:
+                return value.format(**kwargs)
+            except:
+                return value
+        return value
+    
+    def set_language(self, language):
+        """Change the current language"""
+        self.language = language
+        self.load_translations()
+        self.save_language_preference()
+    
+    def save_language_preference(self):
+        """Save language preference to file"""
+        try:
+            prefs_file = BASE / "config" / "preferences.json"
+            prefs_file.parent.mkdir(parents=True, exist_ok=True)
+            with open(prefs_file, 'w', encoding='utf-8') as f:
+                json.dump({'language': self.language}, f)
+        except Exception as e:
+            if 'logger' in globals():
+                logger.error(f"Failed to save language preference: {e}")
+    
+    def load_language_preference(self):
+        """Load language preference from file"""
+        try:
+            prefs_file = BASE / "config" / "preferences.json"
+            if prefs_file.exists():
+                with open(prefs_file, 'r', encoding='utf-8') as f:
+                    prefs = json.load(f)
+                    return prefs.get('language', 'fr')
+        except Exception as e:
+            if 'logger' in globals():
+                logger.error(f"Failed to load language preference: {e}")
+        return 'fr'  # Default to French
+
+# Global translator instance
+translator = Translator(Translator('en').load_language_preference())  # Load saved preference
+
 # Configure logging
-log_folder = BASE / "logs"
-log_folder.mkdir(exist_ok=True)
+log_folder = Path("C:/INSTALL/logs")
+log_folder.mkdir(parents=True, exist_ok=True)
 log_file = log_folder / f"psa_diag_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
 
 logging.basicConfig(
@@ -69,7 +148,6 @@ def hide_console():
             if hwnd:
                 # Hide the console window
                 user32.ShowWindow(hwnd, 0)  # SW_HIDE = 0
-                logger.info("Console window hidden")
         except Exception as e:
             logger.error(f"Failed to hide console: {e}")
 
@@ -112,7 +190,6 @@ def load_qss():
     qss_path = BASE / "style.qss"
     try:
         if qss_path.exists():
-            logger.info(f"Loading QSS from: {qss_path}")
             return qss_path.read_text()
         else:
             logger.warning(f"QSS file not found at: {qss_path}")
@@ -325,11 +402,11 @@ class InstallThread(QtCore.QThread):
             if extraction_errors:
                 error_summary = "\n".join(extraction_errors)
                 logger.warning(f"Installation completed with warnings: {error_summary}")
-                message = f"Installation completed with warnings:\n\n{error_summary}\n\nDiagbox has been installed to C:."
+                message = translator.t('messages.install.warnings', warnings=error_summary)
                 self.finished.emit(True, message)
             else:
                 logger.info("Diagbox installed successfully to C:")
-                self.finished.emit(True, "Diagbox installed successfully to C:.")
+                self.finished.emit(True, translator.t('messages.install.success'))
                 
         except Exception as e:
             logger.error(f"Installation failed: {e}", exc_info=True)
@@ -356,7 +433,7 @@ class CleanThread(QtCore.QThread):
         # Delete folders
         for folder in self.folders:
             try:
-                self.item_progress.emit(f"Deleting folder: {os.path.basename(folder)}")
+                self.item_progress.emit(translator.t('labels.deleting_folder', folder=os.path.basename(folder)))
                 shutil.rmtree(folder)
                 logger.info(f"Deleted folder: {folder}")
                 success_count += 1
@@ -370,7 +447,7 @@ class CleanThread(QtCore.QThread):
         # Delete shortcuts
         for shortcut in self.shortcuts:
             try:
-                self.item_progress.emit(f"Deleting shortcut: {os.path.basename(shortcut)}")
+                self.item_progress.emit(translator.t('labels.deleting_shortcut', shortcut=os.path.basename(shortcut)))
                 os.remove(shortcut)
                 logger.info(f"Deleted shortcut: {shortcut}")
                 success_count += 1
@@ -384,10 +461,10 @@ class CleanThread(QtCore.QThread):
         # Build result message
         if self.failed_items:
             error_list = "\n".join(self.failed_items)
-            message = f"Cleaned {success_count} item(s) successfully.\n\nFailed to delete:\n{error_list}"
+            message = translator.t('messages.clean.partial', count=success_count, errors=error_list)
             self.finished.emit(False, message, success_count)
         else:
-            message = f"Successfully cleaned {success_count} item(s)."
+            message = translator.t('messages.clean.success', count=success_count)
             self.finished.emit(True, message, success_count)
 
 
@@ -397,10 +474,10 @@ class MainWindow(QtWidgets.QWidget):
     def __init__(self):
         super().__init__()
         logger.info("Initializing MainWindow")
-        self.setWindowTitle("PSA-DIAG FREE")
+        self.setWindowTitle(translator.t('app.title'))
         self.setWindowFlags(QtCore.Qt.WindowType.FramelessWindowHint)
         self.setAttribute(QtCore.Qt.WidgetAttribute.WA_TranslucentBackground)
-        self.resize(900, 420)
+        self.resize(900, 500)
 
         # Download variables
         self.download_folder = "C:\\INSTALL\\"
@@ -416,7 +493,7 @@ class MainWindow(QtWidgets.QWidget):
         self.log_handler = None
         
         # Fetch last version first
-        logger.info("Fetching last Diagbox version...")
+        logger.info("[STEP 1] -- Fetching last Diagbox version...")
         self.fetch_last_version_diagbox()
         
         # Version options: (display_name, version, url)
@@ -439,7 +516,7 @@ class MainWindow(QtWidgets.QWidget):
             self.footer_progress.setValue(value)
             self.footer_progress.setFormat(f"{value / 10:.1f}% - {speed:.1f} MB/s - {eta}")
         if hasattr(self, 'footer_label'):
-            self.footer_label.setText("Downloading Diagbox...")
+            self.footer_label.setText(translator.t('labels.downloading'))
         
         QtWidgets.QApplication.processEvents()
 
@@ -451,15 +528,15 @@ class MainWindow(QtWidgets.QWidget):
             self.cancel_button.setVisible(False)
         if self.pause_button:
             self.pause_button.setVisible(False)
-            self.pause_button.setText("Pause")
+            self.pause_button.setText(translator.t('buttons.pause'))
         
         # Update footer
         if hasattr(self, 'footer_progress'):
             self.footer_progress.setRange(0, 1000)
             self.footer_progress.setValue(1000 if success else 0)
-            self.footer_progress.setFormat("Download Complete" if success else "Download Failed")
+            self.footer_progress.setFormat(translator.t('messages.download.complete') if success else translator.t('messages.download.failed_format'))
         if hasattr(self, 'footer_label'):
-            self.footer_label.setText("Download complete" if success else "Download failed")
+            self.footer_label.setText(translator.t('labels.download_complete') if success else translator.t('labels.download_failed'))
         
         # Check if auto-install is enabled
         if success and self.auto_install and self.auto_install.isChecked():
@@ -469,10 +546,10 @@ class MainWindow(QtWidgets.QWidget):
         else:
             # Re-enable all buttons and combo box only if not auto-installing
             self.set_buttons_enabled(True)
-            QtWidgets.QMessageBox.information(self, "Download", message)
+            QtWidgets.QMessageBox.information(self, translator.t('messages.download.title'), message)
             # Reset footer after message
             if hasattr(self, 'footer_label'):
-                self.footer_label.setText("Ready")
+                self.footer_label.setText(translator.t('labels.ready'))
             if hasattr(self, 'footer_progress'):
                 self.footer_progress.setValue(0)
                 self.footer_progress.setFormat("")
@@ -512,8 +589,8 @@ class MainWindow(QtWidgets.QWidget):
         if not os.path.exists(lang_file):
             QtWidgets.QMessageBox.warning(
                 self,
-                "Change Language",
-                f"Language file not found.\n\nExpected location:\n{lang_file}\n\nPlease install Diagbox first."
+                translator.t('messages.language.title'),
+                translator.t('messages.language.not_found', path=lang_file)
             )
             return
         
@@ -541,15 +618,15 @@ class MainWindow(QtWidgets.QWidget):
             logger.info(f"Language changed successfully to {new_lang_code}")
             QtWidgets.QMessageBox.information(
                 self,
-                "Change Language",
-                f"Language changed to {new_lang_code}\n\nPlease restart Diagbox for changes to take effect."
+                translator.t('messages.language.title'),
+                translator.t('messages.language.success', lang=new_lang_code)
             )
         except Exception as e:
             logger.error(f"Failed to change language: {e}", exc_info=True)
             QtWidgets.QMessageBox.critical(
                 self,
-                "Change Language",
-                f"Failed to change language:\n\n{str(e)}"
+                translator.t('messages.language.title'),
+                translator.t('messages.language.failed', error=str(e))
             )
 
     def check_downloaded_versions(self):
@@ -596,11 +673,11 @@ class MainWindow(QtWidgets.QWidget):
             if self.download_thread._is_paused:
                 self.download_thread.resume()
                 if self.pause_button:
-                    self.pause_button.setText("Pause")
+                    self.pause_button.setText(translator.t('buttons.pause'))
             else:
                 self.download_thread.pause()
                 if self.pause_button:
-                    self.pause_button.setText("Resume")
+                    self.pause_button.setText(translator.t('buttons.resume'))
 
     def on_install_finished(self, success, message, install_button, bar):
         # Re-enable all buttons and combo box FIRST
@@ -610,16 +687,16 @@ class MainWindow(QtWidgets.QWidget):
         if hasattr(self, 'footer_progress'):
             self.footer_progress.setRange(0, 100)
             self.footer_progress.setValue(100 if success else 0)
-            self.footer_progress.setFormat("Installation complete" if success else "Installation failed")
+            self.footer_progress.setFormat(translator.t('messages.install.complete') if success else translator.t('messages.install.failed_status'))
         if hasattr(self, 'footer_label'):
-            self.footer_label.setText("Installation complete" if success else "Installation failed")
+            self.footer_label.setText(translator.t('labels.installation_complete') if success else translator.t('labels.installation_failed'))
         
         # Refresh install page if installation was successful
         if success:
             self.refresh_install_page()
         
         # Show message box AFTER re-enabling buttons
-        QtWidgets.QMessageBox.information(self, "Install", message)
+        QtWidgets.QMessageBox.information(self, translator.t('messages.install.title'), message)
         
         # Reset footer after a delay
         QtCore.QTimer.singleShot(3000, self.reset_footer)
@@ -627,7 +704,7 @@ class MainWindow(QtWidgets.QWidget):
     def reset_footer(self):
         """Reset footer to ready state"""
         if hasattr(self, 'footer_label'):
-            self.footer_label.setText("Ready")
+            self.footer_label.setText(translator.t('labels.ready'))
         if hasattr(self, 'footer_progress'):
             self.footer_progress.setValue(0)
             self.footer_progress.setFormat("")
@@ -637,22 +714,22 @@ class MainWindow(QtWidgets.QWidget):
         # Update installed version label
         if hasattr(self, 'header_installed'):
             installed_version = self.check_installed_version()
-            version_text = installed_version if installed_version else "Not installed"
-            self.header_installed.setText(f"Installed Version : {version_text}")
+            version_text = installed_version if installed_version else translator.t('labels.not_installed')
+            self.header_installed.setText(translator.t('labels.installed_version', version=version_text))
         
         # Update downloaded versions label
         downloaded_versions = self.check_downloaded_versions()
         if downloaded_versions:
             downloaded_text = ", ".join([f"{v['version']} ({v['size_mb']:.1f} MB)" for v in downloaded_versions])
             if hasattr(self, 'header_downloaded') and self.header_downloaded:
-                self.header_downloaded.setText(f"Downloaded : {downloaded_text}")
+                self.header_downloaded.setText(translator.t('labels.downloaded_versions', versions=downloaded_text))
                 self.header_downloaded.setVisible(True)
             else:
                 # Create downloaded label if it doesn't exist
                 install_page = self.stack.widget(0)  # Install page is first (index 0)
                 if install_page:
                     layout = install_page.layout()
-                    self.header_downloaded = QtWidgets.QLabel(f"Downloaded : {downloaded_text}")
+                    self.header_downloaded = QtWidgets.QLabel(translator.t('labels.downloaded_versions', versions=downloaded_text))
                     self.header_downloaded.setObjectName("sectionHeader")
                     self.header_downloaded.setStyleSheet("color: #5cb85c;")
                     layout.insertWidget(2, self.header_downloaded)  # Insert after installed and online version
@@ -699,11 +776,8 @@ class MainWindow(QtWidgets.QWidget):
             version = self.last_version_diagbox if self.last_version_diagbox else "Unknown"
             QtWidgets.QMessageBox.warning(
                 self, 
-                "Install", 
-                f"Diagbox file not found.\n\n"
-                f"Version: {version}\n"
-                f"Expected path: {self.diagbox_path}\n\n"
-                f"Please download this version first."
+                translator.t('messages.install.title'), 
+                translator.t('messages.install.file_not_found', version=version, path=self.diagbox_path)
             )
             return
         
@@ -753,8 +827,8 @@ class MainWindow(QtWidgets.QWidget):
         if not folders_to_delete and not shortcuts_to_delete:
             QtWidgets.QMessageBox.information(
                 self,
-                "Clean Diagbox",
-                "No Diagbox folders or shortcuts found to clean.\n\nFolders checked:\n- C:\\APP\n- C:\\AWRoot\n- C:\\APPLIC\n\nShortcuts checked:\n- Public Desktop shortcuts"
+                translator.t('messages.clean.title'),
+                translator.t('messages.clean.nothing_to_clean')
             )
             return
         
@@ -772,8 +846,8 @@ class MainWindow(QtWidgets.QWidget):
         items_text = "\n".join(items_list)
         reply = QtWidgets.QMessageBox.question(
             self,
-            "Clean Diagbox",
-            f"This will permanently delete the following items:\n\n{items_text}\n\nAre you sure?",
+            translator.t('messages.clean.title'),
+            translator.t('messages.clean.confirm', items=items_text),
             QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No,
             QtWidgets.QMessageBox.StandardButton.No
         )
@@ -829,9 +903,9 @@ class MainWindow(QtWidgets.QWidget):
         
         # Show result
         if success:
-            QtWidgets.QMessageBox.information(self, "Clean Diagbox", message)
+            QtWidgets.QMessageBox.information(self, translator.t('messages.clean.title'), message)
         else:
-            QtWidgets.QMessageBox.warning(self, "Clean Diagbox", message)
+            QtWidgets.QMessageBox.warning(self, translator.t('messages.clean.title'), message)
         
         # Reset footer after a delay
         QtCore.QTimer.singleShot(3000, self.reset_footer)
@@ -846,8 +920,8 @@ class MainWindow(QtWidgets.QWidget):
             logger.error(f"VCI Driver installer not found: {driver_path}")
             QtWidgets.QMessageBox.warning(
                 self,
-                "Install VCI Driver",
-                f"VCI Driver installer not found.\n\nExpected location:\n{driver_path}\n\nPlease install Diagbox first."
+                translator.t('messages.vci_driver.title'),
+                translator.t('messages.vci_driver.not_found', path=driver_path)
             )
             return
         
@@ -864,20 +938,20 @@ class MainWindow(QtWidgets.QWidget):
             if result.returncode == 0 or result.returncode == 6:
                 QtWidgets.QMessageBox.information(
                     self,
-                    "Install VCI Driver",
-                    "VCI Driver installed successfully."
+                    translator.t('messages.vci_driver.title'),
+                    translator.t('messages.vci_driver.success')
                 )
             else:
                 QtWidgets.QMessageBox.warning(
                     self,
-                    "Install VCI Driver",
-                    f"VCI Driver installation returned code: {result.returncode}\n\nThe driver may already be installed or require a reboot."
+                    translator.t('messages.vci_driver.title'),
+                    translator.t('messages.vci_driver.warning', code=result.returncode)
                 )
         except Exception as e:
             QtWidgets.QMessageBox.critical(
                 self,
-                "Install VCI Driver",
-                f"Failed to install VCI Driver:\n\n{str(e)}"
+                translator.t('messages.vci_driver.title'),
+                translator.t('messages.vci_driver.error', error=str(e))
             )
 
     def launch_diagbox(self):
@@ -890,8 +964,8 @@ class MainWindow(QtWidgets.QWidget):
             logger.error(f"Diagbox.exe not found: {diagbox_exe}")
             QtWidgets.QMessageBox.warning(
                 self,
-                "Launch Diagbox",
-                f"Diagbox executable not found.\n\nExpected location:\n{diagbox_exe}\n\nPlease install Diagbox first."
+                translator.t('messages.launch.title'),
+                translator.t('messages.launch.not_found', path=diagbox_exe)
             )
             return
         
@@ -901,8 +975,8 @@ class MainWindow(QtWidgets.QWidget):
         except Exception as e:
             QtWidgets.QMessageBox.critical(
                 self,
-                "Launch Diagbox",
-                f"Failed to launch Diagbox:\n\n{str(e)}"
+                translator.t('messages.launch.title'),
+                translator.t('messages.launch.error', error=str(e))
             )
 
     def kill_diagbox_processes_silent(self):
@@ -996,20 +1070,20 @@ class MainWindow(QtWidgets.QWidget):
             if killed_count > 0:
                 QtWidgets.QMessageBox.information(
                     self,
-                    "Kill/Close Process",
-                    f"Successfully killed {killed_count} process(es)."
+                    translator.t('messages.kill_process.title'),
+                    translator.t('messages.kill_process.success', count=killed_count)
                 )
             else:
                 QtWidgets.QMessageBox.information(
                     self,
-                    "Kill/Close Process",
-                    "No Diagbox processes found running."
+                    translator.t('messages.kill_process.title'),
+                    translator.t('messages.kill_process.none')
                 )
         except Exception as e:
             QtWidgets.QMessageBox.critical(
                 self,
-                "Kill/Close Process",
-                f"Error while trying to kill processes:\n\n{str(e)}"
+                translator.t('messages.kill_process.title'),
+                translator.t('messages.kill_process.error', error=str(e))
             )
 
     def on_language_changed(self):
@@ -1017,6 +1091,27 @@ class MainWindow(QtWidgets.QWidget):
         lang_code = self.language_combo.currentData()
         if lang_code:
             self.change_diagbox_language(lang_code)
+    
+    def on_app_language_changed(self):
+        """Handle application language change"""
+        new_lang = self.app_language_combo.currentData()
+        if new_lang and new_lang != translator.language:
+            translator.set_language(new_lang)
+            # Show restart dialog
+            reply = QtWidgets.QMessageBox.question(
+                self,
+                "Language Changed / Langue Modifiée",
+                "Please restart the application for the language change to take full effect.\n\n"
+                "Veuillez redémarrer l'application pour que le changement de langue prenne pleinement effet.\n\n"
+                "Restart now? / Redémarrer maintenant ?",
+                QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No,
+                QtWidgets.QMessageBox.StandardButton.Yes
+            )
+            
+            if reply == QtWidgets.QMessageBox.StandardButton.Yes:
+                # Restart application
+                QtWidgets.QApplication.quit()
+                subprocess.Popen([sys.executable] + sys.argv)
 
     def fetch_last_version_diagbox(self):
         try:
@@ -1051,11 +1146,8 @@ class MainWindow(QtWidgets.QWidget):
                     logger.info("New version available, showing update dialog")
                     reply = QtWidgets.QMessageBox.question(
                         self,
-                        "Update Available",
-                        f"A new version of PSA-DIAG is available!\n\n"
-                        f"Current version: {APP_VERSION}\n"
-                        f"Latest version: {latest_version}\n\n"
-                        f"Do you want to download it?",
+                        translator.t('messages.update.title'),
+                        translator.t('messages.update.available', current=APP_VERSION, latest=latest_version),
                         QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No,
                         QtWidgets.QMessageBox.StandardButton.Yes
                     )
@@ -1112,7 +1204,7 @@ class MainWindow(QtWidgets.QWidget):
         # Check if file already exists and size matches
         if os.path.exists(file_path):
             if total_size > 0 and os.path.getsize(file_path) == total_size:
-                QtWidgets.QMessageBox.information(self, "Download", f"Diagbox {self.last_version_diagbox} already downloaded.")
+                QtWidgets.QMessageBox.information(self, translator.t('messages.download.title'), translator.t('messages.download.already_downloaded', version=self.last_version_diagbox))
                 return
             else:
                 # File exists but size doesn't match, delete it
@@ -1126,7 +1218,7 @@ class MainWindow(QtWidgets.QWidget):
             self.cancel_button.setVisible(True)
         if self.pause_button:
             self.pause_button.setVisible(True)
-            self.pause_button.setText("Pause")
+            self.pause_button.setText(translator.t('buttons.pause'))
         
         # Set progress bar
         bar = self.stack.currentWidget().findChild(QtWidgets.QProgressBar)
@@ -1156,7 +1248,7 @@ class MainWindow(QtWidgets.QWidget):
         vbox.setSpacing(14)
 
         # Title in sidebar
-        title_sidebar = QtWidgets.QLabel("PSA-DIAG FREE")
+        title_sidebar = QtWidgets.QLabel(translator.t('app.title'))
         title_sidebar.setObjectName("titleLabel")
         title_sidebar.setWordWrap(True)
         title_sidebar.setStyleSheet("font-size: 13px;")
@@ -1188,8 +1280,8 @@ class MainWindow(QtWidgets.QWidget):
         # Custom title row (min/close only)
         title_row = QtWidgets.QHBoxLayout()
         title_row.addStretch()
-        btn_min = QtWidgets.QPushButton("-")
-        btn_close = QtWidgets.QPushButton("X")
+        btn_min = QtWidgets.QPushButton(translator.t('buttons.minimize'))
+        btn_close = QtWidgets.QPushButton(translator.t('buttons.close'))
         btn_min.setFixedSize(34,28)
         btn_close.setFixedSize(34,28)
         btn_min.setObjectName("titleButton")
@@ -1217,7 +1309,7 @@ class MainWindow(QtWidgets.QWidget):
         footer_layout.setSpacing(4)
         
         # Progress label
-        self.footer_label = QtWidgets.QLabel("Ready")
+        self.footer_label = QtWidgets.QLabel(translator.t('labels.ready'))
         self.footer_label.setStyleSheet("color: #b0b0b0; font-size: 11px;")
         footer_layout.addWidget(self.footer_label)
         
@@ -1310,7 +1402,7 @@ class MainWindow(QtWidgets.QWidget):
         layout = QtWidgets.QVBoxLayout(w)
         layout.setSpacing(12)
 
-        header = QtWidgets.QLabel("System Configuration")
+        header = QtWidgets.QLabel(translator.t('labels.system_config'))
         header.setObjectName("sectionHeader")
         layout.addWidget(header)
 
@@ -1322,13 +1414,33 @@ class MainWindow(QtWidgets.QWidget):
         self.os_label = QtWidgets.QLabel()
         self.storage_label = QtWidgets.QLabel()
         self.ram_label = QtWidgets.QLabel()
-        form.addRow("Windows Version :", self.os_label)
-        form.addRow("Free storage :", self.storage_label)
-        form.addRow("RAM :", self.ram_label)
+        form.addRow(translator.t('labels.windows_version'), self.os_label)
+        form.addRow(translator.t('labels.free_storage'), self.storage_label)
+        form.addRow(translator.t('labels.ram'), self.ram_label)
         layout.addWidget(reqs)
 
+        # Application language selection
+        lang_section = QtWidgets.QFrame()
+        lang_layout = QtWidgets.QHBoxLayout(lang_section)
+        lang_layout.setContentsMargins(0, 10, 0, 0)
+        lang_label = QtWidgets.QLabel("Application Language :")
+        self.app_language_combo = QtWidgets.QComboBox()
+        self.app_language_combo.addItem("Français", userData="fr")
+        self.app_language_combo.addItem("English", userData="en")
+        
+        # Set current language
+        current_index = 0 if translator.language == 'fr' else 1
+        self.app_language_combo.setCurrentIndex(current_index)
+        
+        self.app_language_combo.setMinimumWidth(150)
+        self.app_language_combo.currentIndexChanged.connect(self.on_app_language_changed)
+        lang_layout.addWidget(lang_label)
+        lang_layout.addWidget(self.app_language_combo)
+        lang_layout.addStretch()
+        layout.addWidget(lang_section)
+
         layout.addStretch()
-        recheck = QtWidgets.QPushButton("Re-check system")
+        recheck = QtWidgets.QPushButton(translator.t('buttons.recheck'))
         recheck.setFixedWidth(160)
         recheck.clicked.connect(self.check_system)
         layout.addWidget(recheck, 0, QtCore.Qt.AlignmentFlag.AlignLeft)
@@ -1345,12 +1457,12 @@ class MainWindow(QtWidgets.QWidget):
             self.fetch_last_version_diagbox()
 
         installed_version = self.check_installed_version()
-        version_text = installed_version if installed_version else "Not installed"
-        self.header_installed = QtWidgets.QLabel(f"Installed Version : {version_text}")
+        version_text = installed_version if installed_version else translator.t('labels.not_installed')
+        self.header_installed = QtWidgets.QLabel(translator.t('labels.installed_version', version=version_text))
         self.header_installed.setObjectName("sectionHeader")
         layout.addWidget(self.header_installed)
 
-        header_online = QtWidgets.QLabel(f"Last Version : {self.last_version_diagbox if self.last_version_diagbox else 'Unknown'}")
+        header_online = QtWidgets.QLabel(translator.t('labels.last_version', version=self.last_version_diagbox if self.last_version_diagbox else 'Unknown'))
         header_online.setObjectName("sectionHeader")
         layout.addWidget(header_online)
 
@@ -1358,7 +1470,7 @@ class MainWindow(QtWidgets.QWidget):
         downloaded_versions = self.check_downloaded_versions()
         if downloaded_versions:
             downloaded_text = ", ".join([f"{v['version']} ({v['size_mb']:.1f} MB)" for v in downloaded_versions])
-            self.header_downloaded = QtWidgets.QLabel(f"Downloaded : {downloaded_text}")
+            self.header_downloaded = QtWidgets.QLabel(translator.t('labels.downloaded_versions', versions=downloaded_text))
             self.header_downloaded.setObjectName("sectionHeader")
             self.header_downloaded.setStyleSheet("color: #5cb85c;")
             layout.addWidget(self.header_downloaded)
@@ -1371,7 +1483,7 @@ class MainWindow(QtWidgets.QWidget):
 
         # Version selection dropdown
         version_layout = QtWidgets.QHBoxLayout()
-        version_label = QtWidgets.QLabel("Select Version :")
+        version_label = QtWidgets.QLabel(translator.t('labels.select_version'))
         self.version_combo = QtWidgets.QComboBox()
         for display_name, version, url in self.version_options:
             self.version_combo.addItem(display_name, userData=(version, url))
@@ -1383,7 +1495,7 @@ class MainWindow(QtWidgets.QWidget):
 
         # Toggle auto install
         h = QtWidgets.QHBoxLayout()
-        lbl = QtWidgets.QLabel("Auto Install after download :")
+        lbl = QtWidgets.QLabel(translator.t('labels.auto_install'))
         toggle = QtWidgets.QCheckBox()
         self.auto_install = toggle
         h.addWidget(lbl)
@@ -1393,31 +1505,31 @@ class MainWindow(QtWidgets.QWidget):
 
         # Language selection
         lang_layout = QtWidgets.QHBoxLayout()
-        lang_label = QtWidgets.QLabel("Diagbox Language :")
+        lang_label = QtWidgets.QLabel(translator.t('labels.diagbox_language'))
         self.language_combo = QtWidgets.QComboBox()
         
         # Language options: (display_name, lang_code)
         languages = [
-            ("English", "en_GB"),
-            ("Français", "fr_FR"),
-            ("Italiano", "it_IT"),
-            ("Nederlands", "nl_NL"),
-            ("Polski", "pl_PL"),
-            ("Português", "pt_PT"),
-            ("Russian", "ru_RU"),
-            ("Türkçe", "tr_TR"),
-            ("Svenska", "sv_SE"),
-            ("Dansk", "da_DK"),
-            ("Čeština", "cs_CZ"),
-            ("Deutsch", "de_DE"),
-            ("Greek", "el_GR"),
-            ("Hrvatski", "hr_HR"),
-            ("Chinese", "zh_CN"),
-            ("Japanese", "ja_JP"),
-            ("Español", "es_ES"),
-            ("Slovenščina", "sl_SI"),
-            ("Hungarian", "hu_HU"),
-            ("Suomi", "fi_FI"),
+            (translator.t('languages.en_GB'), "en_GB"),
+            (translator.t('languages.fr_FR'), "fr_FR"),
+            (translator.t('languages.it_IT'), "it_IT"),
+            (translator.t('languages.nl_NL'), "nl_NL"),
+            (translator.t('languages.pl_PL'), "pl_PL"),
+            (translator.t('languages.pt_PT'), "pt_PT"),
+            (translator.t('languages.ru_RU'), "ru_RU"),
+            (translator.t('languages.tr_TR'), "tr_TR"),
+            (translator.t('languages.sv_SE'), "sv_SE"),
+            (translator.t('languages.da_DK'), "da_DK"),
+            (translator.t('languages.cs_CZ'), "cs_CZ"),
+            (translator.t('languages.de_DE'), "de_DE"),
+            (translator.t('languages.el_GR'), "el_GR"),
+            (translator.t('languages.hr_HR'), "hr_HR"),
+            (translator.t('languages.zh_CN'), "zh_CN"),
+            (translator.t('languages.ja_JP'), "ja_JP"),
+            (translator.t('languages.es_ES'), "es_ES"),
+            (translator.t('languages.sl_SI'), "sl_SI"),
+            (translator.t('languages.hu_HU'), "hu_HU"),
+            (translator.t('languages.fi_FI'), "fi_FI"),
         ]
         
         for display_name, lang_code in languages:
@@ -1442,29 +1554,29 @@ class MainWindow(QtWidgets.QWidget):
         grid = QtWidgets.QGridLayout()
         grid.setSpacing(12)
         btns = [
-            ("Download", "download"),
-            ("Install", "install"),
-            ("Clean Diagbox", "clean"),
-            ("Install VCI Driver", "vci"),
-            ("Launch Diagbox", "launch"),
-            ("Kill/Close Process", "kill"),
+            (translator.t('buttons.download'), "download"),
+            (translator.t('buttons.install'), "install"),
+            (translator.t('buttons.clean'), "clean"),
+            (translator.t('buttons.install_vci'), "vci"),
+            (translator.t('buttons.launch'), "launch"),
+            (translator.t('buttons.kill_process'), "kill"),
         ]
-        for i, (txt, _) in enumerate(btns):
+        for i, (txt, action) in enumerate(btns):
             b = QtWidgets.QPushButton(txt)
             b.setMinimumHeight(44)
             b.setObjectName("actionButton")
-            if txt == "Download":
+            if action == "download":
                 self.download_button = b
                 b.clicked.connect(self.download_diagbox)
-            elif txt == "Install":
+            elif action == "install":
                 b.clicked.connect(self.install_diagbox)
-            elif txt == "Clean Diagbox":
+            elif action == "clean":
                 b.clicked.connect(self.clean_diagbox)
-            elif txt == "Install VCI Driver":
+            elif action == "vci":
                 b.clicked.connect(self.install_vci_driver)
-            elif txt == "Launch Diagbox":
+            elif action == "launch":
                 b.clicked.connect(self.launch_diagbox)
-            elif txt == "Kill/Close Process":
+            elif action == "kill":
                 b.clicked.connect(self.kill_diagbox)
             grid.addWidget(b, i//3, i%3)
 
@@ -1473,7 +1585,7 @@ class MainWindow(QtWidgets.QWidget):
         # Pause and Cancel buttons (hidden by default)
         buttons_row = QtWidgets.QHBoxLayout()
         
-        self.pause_button = QtWidgets.QPushButton("Pause")
+        self.pause_button = QtWidgets.QPushButton(translator.t('buttons.pause'))
         self.pause_button.setMinimumHeight(44)
         self.pause_button.setObjectName("actionButton")
         self.pause_button.setStyleSheet("background-color: #f0ad4e; color: white;")
@@ -1481,7 +1593,7 @@ class MainWindow(QtWidgets.QWidget):
         self.pause_button.setVisible(False)
         buttons_row.addWidget(self.pause_button)
         
-        self.cancel_button = QtWidgets.QPushButton("Cancel Download")
+        self.cancel_button = QtWidgets.QPushButton(translator.t('buttons.cancel'))
         self.cancel_button.setMinimumHeight(44)
         self.cancel_button.setObjectName("actionButton")
         self.cancel_button.setStyleSheet("background-color: #d9534f; color: white;")
@@ -1499,7 +1611,7 @@ class MainWindow(QtWidgets.QWidget):
     def page_update(self):
         w = QtWidgets.QWidget()
         layout = QtWidgets.QVBoxLayout(w)
-        layout.addWidget(QtWidgets.QLabel("Update / Refresh (Not available)"))
+        layout.addWidget(QtWidgets.QLabel(translator.t('messages.page_update')))
         layout.addStretch()
         return w
 
@@ -1522,7 +1634,7 @@ class MainWindow(QtWidgets.QWidget):
             logo.setText("Logo non disponible")
         top_layout.addWidget(logo)
         
-        version_label = QtWidgets.QLabel(f"Version: {APP_VERSION}")
+        version_label = QtWidgets.QLabel(translator.t('labels.version', version=APP_VERSION))
         version_label.setStyleSheet("font-size: 14px;")
         top_layout.addWidget(version_label)
         top_layout.addStretch()
@@ -1530,7 +1642,7 @@ class MainWindow(QtWidgets.QWidget):
         layout.addWidget(top_section)
         
         # Toggle console button
-        self.toggle_log_btn = QtWidgets.QPushButton("Show Console")
+        self.toggle_log_btn = QtWidgets.QPushButton(translator.t('buttons.hide_console'))
         self.toggle_log_btn.setObjectName("actionButton")
         self.toggle_log_btn.setFixedHeight(44)
         self.toggle_log_btn.clicked.connect(self.toggle_console)
@@ -1550,7 +1662,7 @@ class MainWindow(QtWidgets.QWidget):
                 padding: 8px;
             }
         """)
-        self.log_widget.setVisible(False)
+        self.log_widget.setVisible(True)
         self.log_widget.setMinimumHeight(200)
         layout.addWidget(self.log_widget)
         
@@ -1569,11 +1681,11 @@ class MainWindow(QtWidgets.QWidget):
             self.log_widget.setVisible(not is_visible)
             
             if self.toggle_log_btn:
-                self.toggle_log_btn.setText("Hide Console" if not is_visible else "Show Console")
+                self.toggle_log_btn.setText(translator.t('buttons.hide_console') if not is_visible else translator.t('buttons.show_console'))
             
             # Adjust window height
             if not is_visible:
-                self.resize(900, 650)  # Expanded height
+                self.resize(900, 500)  # Expanded height
             else:
                 self.resize(900, 420)  # Original height
     def mousePressEvent(self, event):

@@ -1,0 +1,136 @@
+{
+  "app": {
+    "title": "PSA-DIAG FREE"
+  },
+  "menu": {
+    "config": "Configuration",
+    "install": "Installation",
+    "update": "Mise à jour",
+    "info": "Info"
+  },
+  "buttons": {
+    "download": "Télécharger",
+    "install": "Installer",
+    "clean": "Nettoyer Diagbox",
+    "install_vci": "Installer VCI Driver",
+    "launch": "Lancer Diagbox",
+    "kill_process": "Tuer/Fermer Processus",
+    "pause": "Pause",
+    "resume": "Reprendre",
+    "cancel": "Annuler le téléchargement",
+    "recheck": "Re-vérifier le système",
+    "show_console": "Afficher la Console",
+    "hide_console": "Masquer la Console",
+    "minimize": "-",
+    "close": "X"
+  },
+  "labels": {
+    "installed_version": "Version Installée : {version}",
+    "last_version": "Dernière Version : {version}",
+    "downloaded_versions": "Téléchargé : {versions}",
+    "not_installed": "Non installé",
+    "select_version": "Sélectionner Version :",
+    "auto_install": "Auto Installation après téléchargement :",
+    "diagbox_language": "Langue Diagbox :",
+    "windows_version": "Version Windows :",
+    "free_storage": "Espace disque :",
+    "ram": "RAM :",
+    "version": "Version: {version}",
+    "system_config": "Configuration Système",
+    "ready": "Prêt",
+    "downloading": "Téléchargement Diagbox...",
+    "download_complete": "Téléchargement complet",
+    "download_failed": "Téléchargement échoué",
+    "installing": "Installation Diagbox...",
+    "installing_file": "Installation : {file}",
+    "installation_complete": "Installation terminée",
+    "installation_failed": "Installation échouée",
+    "cleaning": "Nettoyage Diagbox...",
+    "deleting_folder": "Suppression du dossier : {folder}",
+    "deleting_shortcut": "Suppression du raccourci : {shortcut}",
+    "clean_complete": "Nettoyage terminé",
+    "extracting": "Extraction... {percent}%"
+  },
+  "messages": {
+    "download": {
+      "title": "Téléchargement",
+      "already_downloaded": "Diagbox {version} déjà téléchargé.",
+      "success": "Diagbox {version} téléchargé avec succès.",
+      "failed": "Échec du téléchargement Diagbox {version} : {error}",
+      "cancelled": "Téléchargement Diagbox {version} annulé",
+      "complete": "100.0% - Téléchargement Terminé",
+      "failed_format": "0.0% - Téléchargement Échoué"
+    },
+    "install": {
+      "title": "Installation",
+      "file_not_found": "Fichier Diagbox introuvable.\n\nVersion: {version}\nChemin attendu: {path}\n\nVeuillez d'abord télécharger cette version.",
+      "success": "Diagbox installé avec succès sur C:.",
+      "warnings": "Installation terminée avec des avertissements :\n\n{warnings}\n\nDiagbox a été installé sur C:.",
+      "failed": "Échec de l'installation : {error}",
+      "complete": "Installation terminée",
+      "failed_status": "Installation échouée"
+    },
+    "clean": {
+      "title": "Nettoyer Diagbox",
+      "nothing_to_clean": "Aucun dossier ou raccourci Diagbox à nettoyer.\n\nDossiers vérifiés:\n- C:\\APP\n- C:\\AWRoot\n- C:\\APPLIC\n\nRaccourcis vérifiés:\n- Raccourcis Bureau Public",
+      "confirm": "Ceci va supprimer définitivement les éléments suivants :\n\n{items}\n\nÊtes-vous sûr ?",
+      "success": "Nettoyé avec succès {count} élément(s).",
+      "partial": "Nettoyé {count} élément(s) avec succès.\n\nÉchec de suppression :\n{errors}",
+      "folders": "Dossiers:",
+      "shortcuts": "Raccourcis:"
+    },
+    "vci_driver": {
+      "title": "Installer VCI Driver",
+      "not_found": "Installateur VCI Driver introuvable.\n\nEmplacement attendu:\n{path}\n\nVeuillez d'abord installer Diagbox.",
+      "success": "VCI Driver installé avec succès.",
+      "warning": "L'installation du VCI Driver a retourné le code : {code}\n\nLe pilote est peut-être déjà installé ou nécessite un redémarrage.",
+      "error": "Échec de l'installation du VCI Driver :\n\n{error}"
+    },
+    "launch": {
+      "title": "Lancer Diagbox",
+      "not_found": "Exécutable Diagbox introuvable.\n\nEmplacement attendu:\n{path}\n\nVeuillez d'abord installer Diagbox.",
+      "error": "Échec du lancement de Diagbox :\n\n{error}"
+    },
+    "kill_process": {
+      "title": "Tuer/Fermer Processus",
+      "success": "Tué avec succès {count} processus.",
+      "none": "Aucun processus Diagbox en cours d'exécution.",
+      "error": "Erreur lors de la tentative de tuer les processus :\n\n{error}"
+    },
+    "language": {
+      "title": "Changer de Langue",
+      "not_found": "Fichier de langue introuvable.\n\nEmplacement attendu:\n{path}\n\nVeuillez d'abord installer Diagbox.",
+      "success": "Langue changée en {lang}\n\nVeuillez redémarrer Diagbox pour que les modifications prennent effet.",
+      "failed": "Échec du changement de langue :\n\n{error}"
+    },
+    "update": {
+      "title": "Mise à jour Disponible",
+      "available": "Une nouvelle version de PSA-DIAG est disponible !\n\nVersion actuelle: {current}\nDernière version: {latest}\n\nVoulez-vous la télécharger ?",
+      "error": "Erreur",
+      "fetch_failed": "Échec de récupération de la dernière version : {error}"
+    },
+    "page_update": "Mise à jour / Actualiser (Non disponible)"
+  },
+  "languages": {
+    "en_GB": "Anglais",
+    "fr_FR": "Français",
+    "it_IT": "Italien",
+    "nl_NL": "Néerlandais",
+    "pl_PL": "Polonais",
+    "pt_PT": "Portugais",
+    "ru_RU": "Russe",
+    "tr_TR": "Turc",
+    "sv_SE": "Suédois",
+    "da_DK": "Danois",
+    "cs_CZ": "Tchèque",
+    "de_DE": "Allemand",
+    "el_GR": "Grec",
+    "hr_HR": "Croate",
+    "zh_CN": "Chinois",
+    "ja_JP": "Japonais",
+    "es_ES": "Espagnol",
+    "sl_SI": "Slovène",
+    "hu_HU": "Hongrois",
+    "fi_FI": "Finnois"
+  }
+}

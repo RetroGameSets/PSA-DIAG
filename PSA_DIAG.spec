@@ -11,6 +11,7 @@ a = Analysis(
         ('icons/*.svg', 'icons'),
         ('icons/*.png', 'icons'),
         ('tools/7z.exe', 'tools'),
+        ('lang/*.json', 'lang'),
     ],
     hiddenimports=[],
     hookspath=[],
