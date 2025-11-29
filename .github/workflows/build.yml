@@ -16,6 +16,9 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+    env:
+      # Prefer a provided PERSONAL_ACCESS_TOKEN secret, otherwise use the default GITHUB_TOKEN
+      GITHUB_TOKEN: ${{ secrets.PERSONAL_ACCESS_TOKEN && secrets.PERSONAL_ACCESS_TOKEN || secrets.GITHUB_TOKEN }}
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -37,34 +40,21 @@ jobs:
         shell: bash
 
       - name: Create Release
-        id: create_release
-        uses: actions/create-release@v1
-        env:
-          # Use PERSONAL_ACCESS_TOKEN if set, otherwise fall back to GITHUB_TOKEN
-          GITHUB_TOKEN: ${{ secrets.PERSONAL_ACCESS_TOKEN && secrets.PERSONAL_ACCESS_TOKEN || secrets.GITHUB_TOKEN }}
-        with:
-          tag_name: ${{ github.ref }}
-          release_name: PSA-DIAG ${{ steps.get_version.outputs.VERSION }}
-          draft: false
-          prerelease: false
-          body: |
-            ## PSA-DIAG ${{ steps.get_version.outputs.VERSION }}
+        - name: Create Release and upload asset
+          uses: softprops/action-gh-release@v2
+          with:
+            tag_name: ${{ github.ref }}
+            name: PSA-DIAG ${{ steps.get_version.outputs.VERSION }}
+            body: |
+              ## PSA-DIAG ${{ steps.get_version.outputs.VERSION }}
             
-            ### Installation
-            1. Download `PSA_DIAG.exe` below
-            2. Run as Administrator
+              ### Installation
+              1. Download `PSA_DIAG.exe` below
+              2. Run as Administrator
             
-            ### Changes
-            - Automatic build from tag ${{ github.ref }}
-            - Last commit: ${{ github.event.head_commit.message }}
-
-      - name: Upload Release Asset
-        uses: actions/upload-release-asset@v1
-        env:
-          # Use the same token logic as the release step
-          GITHUB_TOKEN: ${{ secrets.PERSONAL_ACCESS_TOKEN && secrets.PERSONAL_ACCESS_TOKEN || secrets.GITHUB_TOKEN }}
-        with:
-          upload_url: ${{ steps.create_release.outputs.upload_url }}
-          asset_path: ./dist/PSA_DIAG.exe
-          asset_name: PSA_DIAG.exe
-          asset_content_type: application/octet-stream
+              ### Changes
+              - Automatic build from tag ${{ github.ref }}
+              - Last commit: ${{ github.event.head_commit.message }}
+            files: dist/PSA_DIAG.exe
+          env:
+            GITHUB_TOKEN: ${{ env.GITHUB_TOKEN }}
