@@ -40,7 +40,8 @@ jobs:
         id: create_release
         uses: actions/create-release@v1
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Use PERSONAL_ACCESS_TOKEN if set, otherwise fall back to GITHUB_TOKEN
+          GITHUB_TOKEN: ${{ secrets.PERSONAL_ACCESS_TOKEN && secrets.PERSONAL_ACCESS_TOKEN || secrets.GITHUB_TOKEN }}
         with:
           tag_name: ${{ github.ref }}
           release_name: PSA-DIAG ${{ steps.get_version.outputs.VERSION }}
@@ -60,7 +61,8 @@ jobs:
       - name: Upload Release Asset
         uses: actions/upload-release-asset@v1
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Use the same token logic as the release step
+          GITHUB_TOKEN: ${{ secrets.PERSONAL_ACCESS_TOKEN && secrets.PERSONAL_ACCESS_TOKEN || secrets.GITHUB_TOKEN }}
         with:
           upload_url: ${{ steps.create_release.outputs.upload_url }}
           asset_path: ./dist/PSA_DIAG.exe
