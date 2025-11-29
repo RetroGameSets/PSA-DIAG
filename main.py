@@ -20,7 +20,7 @@ from datetime import datetime
 import json
 
 BASE = Path(__file__).resolve().parent
-APP_VERSION = "2.1.0.2"
+APP_VERSION = "2.1.0.0"
 URL_LAST_VERSION_PSADIAG = "https://psa-diag.fr/diagbox/install/last_version_psadiag.json"
 URL_LAST_VERSION_DIAGBOX = "https://psa-diag.fr/diagbox/install/last_version_diagbox.json"
 
