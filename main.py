@@ -1,8 +1,5 @@
 """
-PSA-DIAG FREE - PySide6 skeleton
-Run:
-    pip install -r requirements.txt
-    python main.py
+PSA-DIAG FREE
 """
 import sys
 from pathlib import Path
@@ -19,23 +16,16 @@ import logging
 from datetime import datetime
 import json
 
-# Determine base path for resources. When running as a PyInstaller onefile
-# executable, resources are unpacked to sys._MEIPASS. Use that location for
-# bundled files (lang, icons, etc.). For user-writable config (preferences)
-# use a persistent folder (APPDATA on Windows or home directory otherwise).
+# Determine base path for resources.
 if getattr(sys, 'frozen', False):
     BASE = Path(sys._MEIPASS)
 else:
     BASE = Path(__file__).resolve().parent
 
-# Persistent config directory (where we save preferences). Use APPDATA on
-# Windows so preferences persist across runs of the onefile executable.
-if sys.platform == 'win32':
-    CONFIG_DIR = Path(os.getenv('APPDATA', Path.home())) / 'PSA_DIAG'
-else:
-    CONFIG_DIR = Path.home() / '.psa_diag'
+# Persistent config directory (where we save preferences). Use APPDATA on Windows 
+CONFIG_DIR = Path(os.getenv('APPDATA', Path.home())) / 'PSA_DIAG'
 CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-APP_VERSION = "2.1.0.1"
+APP_VERSION = "2.1.0.2"
 URL_LAST_VERSION_PSADIAG = "https://psa-diag.fr/diagbox/install/last_version_psadiag.json"
 URL_LAST_VERSION_DIAGBOX = "https://psa-diag.fr/diagbox/install/last_version_diagbox.json"
 
@@ -118,7 +108,10 @@ class Translator:
 translator = Translator(Translator('en').load_language_preference())  # Load saved preference
 
 # Configure logging
-log_folder = BASE / "logs"
+# Always write logs to the persistent config directory so the executable
+# (and dev runs) both use the same location. This ensures logs persist
+# across runs and are accessible from the packaged executable.
+log_folder = CONFIG_DIR / "logs"
 log_folder.mkdir(parents=True, exist_ok=True)
 log_file = log_folder / f"psa_diag_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
 
@@ -133,6 +126,7 @@ logging.basicConfig(
 
 logger = logging.getLogger(__name__)
 logger.info(f"PSA-DIAG v{APP_VERSION} starting...")
+logger.info(f"Log file path: {log_file}")
 
 class QTextEditLogger(logging.Handler):
     """Custom logging handler that writes to a QTextEdit widget"""
@@ -1661,6 +1655,13 @@ class MainWindow(QtWidgets.QWidget):
         self.toggle_log_btn.setFixedHeight(44)
         self.toggle_log_btn.clicked.connect(self.toggle_console)
         layout.addWidget(self.toggle_log_btn)
+
+        # Open logs button
+        self.open_log_btn = QtWidgets.QPushButton(translator.t('buttons.open_log'))
+        self.open_log_btn.setObjectName("actionButton")
+        self.open_log_btn.setFixedHeight(44)
+        self.open_log_btn.clicked.connect(self.open_logs)
+        layout.addWidget(self.open_log_btn)
         
         # Console widget (hidden by default)
         self.log_widget = QtWidgets.QTextEdit()
@@ -1702,6 +1703,43 @@ class MainWindow(QtWidgets.QWidget):
                 self.resize(900, 500)  # Expanded height
             else:
                 self.resize(900, 420)  # Original height
+    def open_logs(self):
+        """Open the logs folder and select the most recent log file if present."""
+        try:
+            # Determine latest log file
+            logs_dir = log_folder
+            log_files = sorted(logs_dir.glob('psa_diag_*.log'), key=lambda p: p.stat().st_mtime, reverse=True)
+            if log_files:
+                latest = log_files[0]
+                # On Windows, open Explorer and select the file
+                if sys.platform == 'win32':
+                    try:
+                        subprocess.run(['explorer', f'/select,{str(latest)}'])
+                        return
+                    except Exception:
+                        pass
+                # Fallback: open folder or file using start/open
+                try:
+                    if sys.platform == 'win32':
+                        os.startfile(str(latest))
+                    elif sys.platform == 'darwin':
+                        subprocess.run(['open', str(latest)])
+                    else:
+                        subprocess.run(['xdg-open', str(logs_dir)])
+                    return
+                except Exception:
+                    pass
+
+            # No logs found - try to open the folder instead
+            if sys.platform == 'win32':
+                os.startfile(str(logs_dir))
+            elif sys.platform == 'darwin':
+                subprocess.run(['open', str(logs_dir)])
+            else:
+                subprocess.run(['xdg-open', str(logs_dir)])
+        except Exception as e:
+            logger.error(f"Failed to open logs: {e}")
+            QtWidgets.QMessageBox.warning(self, translator.t('app.title'), translator.t('messages.log.open_failed'))
     def mousePressEvent(self, event):
         if event.button() == QtCore.Qt.MouseButton.LeftButton:
             # Check if click is on a widget that should not trigger window drag

@@ -22,7 +22,8 @@
     "show_console": "Afficher la Console",
     "hide_console": "Masquer la Console",
     "minimize": "-",
-    "close": "X"
+    "close": "X",
+    "open_log": "Ouvrir les logs"
   },
   "labels": {
     "installed_version": "Version Installée : {version}",
@@ -102,6 +103,10 @@
       "not_found": "Fichier de langue introuvable.\n\nEmplacement attendu:\n{path}\n\nVeuillez d'abord installer Diagbox.",
       "success": "Langue changée en {lang}\n\nVeuillez redémarrer Diagbox pour que les modifications prennent effet.",
       "failed": "Échec du changement de langue :\n\n{error}"
+    },
+    "log": {
+      "open_failed": "Aucun fichier de log trouvé.",
+      "opened": "Dossier de logs ouvert : {path}"
     },
     "update": {
       "title": "Mise à jour Disponible",

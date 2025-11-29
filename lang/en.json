@@ -22,7 +22,8 @@
     "show_console": "Show Console",
     "hide_console": "Hide Console",
     "minimize": "-",
-    "close": "X"
+    "close": "X",
+    "open_log": "Open Logs"
   },
   "labels": {
     "installed_version": "Installed Version : {version}",
@@ -102,6 +103,10 @@
       "not_found": "Language file not found.\n\nExpected location:\n{path}\n\nPlease install Diagbox first.",
       "success": "Language changed to {lang}\n\nPlease restart Diagbox for changes to take effect.",
       "failed": "Failed to change language:\n\n{error}"
+    },
+    "log": {
+      "open_failed": "No log files found.",
+      "opened": "Opened logs folder: {path}"
     },
     "update": {
       "title": "Update Available",
