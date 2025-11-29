@@ -19,8 +19,23 @@ import logging
 from datetime import datetime
 import json
 
-BASE = Path(__file__).resolve().parent
-APP_VERSION = "2.1.0.0"
+# Determine base path for resources. When running as a PyInstaller onefile
+# executable, resources are unpacked to sys._MEIPASS. Use that location for
+# bundled files (lang, icons, etc.). For user-writable config (preferences)
+# use a persistent folder (APPDATA on Windows or home directory otherwise).
+if getattr(sys, 'frozen', False):
+    BASE = Path(sys._MEIPASS)
+else:
+    BASE = Path(__file__).resolve().parent
+
+# Persistent config directory (where we save preferences). Use APPDATA on
+# Windows so preferences persist across runs of the onefile executable.
+if sys.platform == 'win32':
+    CONFIG_DIR = Path(os.getenv('APPDATA', Path.home())) / 'PSA_DIAG'
+else:
+    CONFIG_DIR = Path.home() / '.psa_diag'
+CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+APP_VERSION = "2.1.0.1"
 URL_LAST_VERSION_PSADIAG = "https://psa-diag.fr/diagbox/install/last_version_psadiag.json"
 URL_LAST_VERSION_DIAGBOX = "https://psa-diag.fr/diagbox/install/last_version_diagbox.json"
 
@@ -78,7 +93,7 @@ class Translator:
     def save_language_preference(self):
         """Save language preference to file"""
         try:
-            prefs_file = BASE / "config" / "preferences.json"
+            prefs_file = CONFIG_DIR / "preferences.json"
             prefs_file.parent.mkdir(parents=True, exist_ok=True)
             with open(prefs_file, 'w', encoding='utf-8') as f:
                 json.dump({'language': self.language}, f)
@@ -89,7 +104,7 @@ class Translator:
     def load_language_preference(self):
         """Load language preference from file"""
         try:
-            prefs_file = BASE / "config" / "preferences.json"
+            prefs_file = CONFIG_DIR / "preferences.json"
             if prefs_file.exists():
                 with open(prefs_file, 'r', encoding='utf-8') as f:
                     prefs = json.load(f)

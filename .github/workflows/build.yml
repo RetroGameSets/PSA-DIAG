@@ -48,7 +48,7 @@ jobs:
             ## PSA-DIAG ${{ steps.get_version.outputs.VERSION }}
 
             ### Installation
-            1. Download `PSA_DIAG.exe` below
+            1. Download `PSA_DIAG.exe` and replace existing in C:\INSTALL / Télécharger `PSA-DIAG.exe` et remplacer le fichier existant dans C:\INSTALL
             2. Run as Administrator
 
             ### Changes
