@@ -20,7 +20,7 @@ from datetime import datetime
 import json
 
 BASE = Path(__file__).resolve().parent
-APP_VERSION = "2.1.0.0"
+APP_VERSION = "2.1.0.2"
 URL_LAST_VERSION_PSADIAG = "https://psa-diag.fr/diagbox/install/last_version_psadiag.json"
 URL_LAST_VERSION_DIAGBOX = "https://psa-diag.fr/diagbox/install/last_version_diagbox.json"
 
@@ -1103,7 +1103,7 @@ class MainWindow(QtWidgets.QWidget):
                 "Language Changed / Langue Modifiée",
                 "Please restart the application for the language change to take full effect.\n\n"
                 "Veuillez redémarrer l'application pour que le changement de langue prenne pleinement effet.\n\n"
-                "Restart now? / Redémarrer maintenant ?",
+                "Close now? / Quitter maintenant ?",
                 QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No,
                 QtWidgets.QMessageBox.StandardButton.Yes
             )
@@ -1111,7 +1111,6 @@ class MainWindow(QtWidgets.QWidget):
             if reply == QtWidgets.QMessageBox.StandardButton.Yes:
                 # Restart application
                 QtWidgets.QApplication.quit()
-                subprocess.Popen([sys.executable] + sys.argv)
 
     def fetch_last_version_diagbox(self):
         try:
