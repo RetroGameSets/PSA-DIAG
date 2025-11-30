@@ -25,7 +25,7 @@ else:
 # Persistent config directory (where we save preferences). Use APPDATA on Windows 
 CONFIG_DIR = Path(os.getenv('APPDATA', Path.home())) / 'PSA_DIAG'
 CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-APP_VERSION = "2.1.0.5"
+APP_VERSION = "2.1.0.6"
 URL_LAST_VERSION_PSADIAG = "https://psa-diag.fr/diagbox/install/last_version_psadiag.json"
 URL_LAST_VERSION_DIAGBOX = "https://psa-diag.fr/diagbox/install/last_version_diagbox.json"
 
@@ -159,6 +159,28 @@ def hide_console():
                 user32.ShowWindow(hwnd, 0)  # SW_HIDE = 0
         except Exception as e:
             logger.error(f"Failed to hide console: {e}")
+
+def kill_updater_processes():
+    """Terminate any leftover updater.exe processes from previous runs."""
+    try:
+        for proc in psutil.process_iter(['pid', 'name', 'exe']):
+            try:
+                name = (proc.info.get('name') or '').lower()
+                exe = proc.info.get('exe') or ''
+                if name == 'updater.exe' or (exe and os.path.basename(exe).lower() == 'updater.exe'):
+                    logger.info(f"Terminating leftover updater.exe PID={proc.pid}")
+                    try:
+                        proc.terminate()
+                        proc.wait(timeout=2)
+                    except Exception:
+                        try:
+                            proc.kill()
+                        except Exception:
+                            logger.debug(f"Failed to kill updater PID={proc.pid}")
+            except Exception as e:
+                logger.debug(f"Error while checking process for updater: {e}")
+    except Exception as e:
+        logger.debug(f"Failed to enumerate processes to kill updater.exe: {e}")
 
 def is_admin():
     """Check if the script is running with admin privileges"""
@@ -1276,6 +1298,14 @@ class MainWindow(QtWidgets.QWidget):
             target_name = exe_asset.get('name') or f"PSA-DIAG-{latest_version}.exe"
             download_path = str(updates_dir / target_name)
 
+            # If a previous download exists, remove it first to avoid replace conflicts
+            try:
+                if os.path.exists(download_path):
+                    logger.info(f"Removing existing downloaded update before re-downloading: {download_path}")
+                    os.remove(download_path)
+            except Exception as e:
+                logger.warning(f"Failed to remove previous download {download_path}: {e}")
+
             # Download with progress (simple)
             logger.info(f"Downloading update asset: {download_url} -> {download_path}")
             with requests.get(download_url, stream=True, timeout=30) as resp:
@@ -1307,9 +1337,13 @@ class MainWindow(QtWidgets.QWidget):
             try:
                 if getattr(sys, 'frozen', False):
                     # Prefer a bundled native updater executable when frozen
-                    bundled_updater = BASE / 'tools' / 'updater.exe'
-                    if bundled_updater.exists():
-                        cmd = [str(bundled_updater), '--target', str(current_exe), '--new', str(download_path), '--wait-pid', str(os.getpid()), '--restart']
+                    bundled_updater_dir = BASE / 'tools' / 'updater' / 'updater.exe'
+                    bundled_updater_single = BASE / 'tools' / 'updater.exe'
+                    if bundled_updater_dir.exists():
+                        cmd = [str(bundled_updater_dir), '--target', str(current_exe), '--new', str(download_path), '--wait-pid', str(os.getpid()), '--restart']
+                    elif bundled_updater_single.exists():
+                        # legacy single-exe in tools/ (may be onefile)
+                        cmd = [str(bundled_updater_single), '--target', str(current_exe), '--new', str(download_path), '--wait-pid', str(os.getpid()), '--restart']
                     else:
                         # Try system python to run updater.py (best-effort)
                         python_bin = shutil.which('python') or shutil.which('python3') or shutil.which('py')
@@ -1323,15 +1357,25 @@ class MainWindow(QtWidgets.QWidget):
                     # Running from source/interpreter: use current python interpreter
                     cmd = [sys.executable, str(updater_script), '--target', str(current_exe), '--new', str(download_path), '--wait-pid', str(os.getpid()), '--restart']
 
+                # Add a longer timeout for handle release and launch updater
+                cmd.extend(['--timeout', '120'])
                 logger.info(f"Launching updater helper: {cmd}")
-                subprocess.Popen(cmd, creationflags=creationflags)
+                # Ensure updater window is visible: do NOT use CREATE_NO_WINDOW for updater
+                creationflags_for_updater = 0
+                subprocess.Popen(cmd, creationflags=creationflags_for_updater)
             except Exception as e:
                 logger.error(f"Failed to launch updater helper: {e}")
                 QtWidgets.QMessageBox.warning(self, translator.t('messages.update.title'), translator.t('messages.update.launch_failed', error=str(e)))
                 return
 
             # Inform user and quit application to allow updater to replace the exe
-            QtWidgets.QMessageBox.information(self, translator.t('messages.update.title'), translator.t('messages.update.started'))
+            try:
+                # Shutdown logging to help release any file handles held by this process
+                import logging as _logging
+                _logging.shutdown()
+            except Exception:
+                pass
+            # Close the application immediately so the updater can replace the executable
             QtWidgets.QApplication.quit()
 
         except Exception as e:
@@ -1991,6 +2035,11 @@ class MainWindow(QtWidgets.QWidget):
 if __name__ == "__main__":
     # Hide console window first
     hide_console()
+    # Terminate any leftover updater helpers that might still be running
+    try:
+        kill_updater_processes()
+    except Exception as e:
+        logger.debug(f"kill_updater_processes failed: {e}")
     
     # Check if running as admin, if not relaunch with admin privileges
     if not is_admin():

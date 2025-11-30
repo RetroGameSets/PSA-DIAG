@@ -5,27 +5,53 @@ block_cipher = None
 # Ensure PySide6 dynamic libraries and data files are collected so Qt DLLs
 # are bundled into the executable. This helps avoid "DLL load failed while
 # importing QtCore" errors on target machines.
-from PyInstaller.utils.hooks import collect_data_files
+import os
+try:
+    from PyInstaller.utils.hooks import collect_data_files, Tree
+except Exception:
+    from PyInstaller.utils.hooks import collect_data_files
+    Tree = None
 
 # Do NOT collect PySide6 dynamic libs by default (they significantly increase
 # bundle size). We keep data files only if required.
 _pyside6_binaries = []
 _pyside6_datas = collect_data_files('PySide6')
+_pyside6_binaries = []
+_pyside6_datas = collect_data_files('PySide6')
+
+# Prepare datas list and include updater onedir distribution whether Tree is available or not
+datas_list = [
+    ('updater.py', '.'),
+    ('style.qss', '.'),
+    ('icons/*.svg', 'icons'),
+    ('icons/*.png', 'icons'),
+    ('tools/*.exe', 'tools'),
+    ('tools/*.dll', 'tools'),
+    ('lang/*.json', 'lang'),
+    ('config/*.json', 'config'),
+]
+
+# If PyInstaller provides Tree, use it to include the whole folder. Otherwise fall back to manual listing.
+updater_dir = os.path.join('tools', 'updater')
+if Tree is not None and os.path.isdir(updater_dir):
+    datas_list.append(Tree(updater_dir, prefix='tools/updater'))
+elif os.path.isdir(updater_dir):
+    # Walk the updater directory and add each file
+    for root, _, files in os.walk(updater_dir):
+        rel_root = os.path.relpath(root, updater_dir)
+        for fn in files:
+            src = os.path.join(root, fn)
+            # destination inside the bundle should preserve the updater folder structure
+            dest_dir = os.path.join('tools', 'updater', rel_root) if rel_root != '.' else os.path.join('tools', 'updater')
+            datas_list.append((src, dest_dir))
+
+datas = datas_list + _pyside6_datas
 
 a = Analysis(
     ['main.py'],
     pathex=[],
     binaries=_pyside6_binaries,
-    datas=[
-        ('updater.py', '.'),
-        ('style.qss', '.'),
-        ('icons/*.svg', 'icons'),
-        ('icons/*.png', 'icons'),
-        ('tools/*.exe', 'tools'),
-        ('tools/*.dll', 'tools'),
-        ('lang/*.json', 'lang'),
-        ('config/*.json', 'config'),
-    ] + _pyside6_datas,
+    datas=datas,
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},
