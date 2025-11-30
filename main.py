@@ -1300,12 +1300,30 @@ class MainWindow(QtWidgets.QWidget):
             # Determine current executable to replace
             current_exe = sys.executable if getattr(sys, 'frozen', False) else os.path.abspath(sys.argv[0])
 
-            # Spawn updater: passes --wait-pid so updater waits for this process to exit
-            cmd = [sys.executable, str(updater_script), '--target', str(current_exe), '--new', str(download_path), '--wait-pid', str(os.getpid()), '--restart']
-            logger.info(f"Launching updater helper: {cmd}")
-
+            # Spawn updater: choose the correct launcher depending on frozen state
+            logger.info("Preparing to launch updater helper")
             creationflags = subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
+
             try:
+                if getattr(sys, 'frozen', False):
+                    # Prefer a bundled native updater executable when frozen
+                    bundled_updater = BASE / 'tools' / 'updater.exe'
+                    if bundled_updater.exists():
+                        cmd = [str(bundled_updater), '--target', str(current_exe), '--new', str(download_path), '--wait-pid', str(os.getpid()), '--restart']
+                    else:
+                        # Try system python to run updater.py (best-effort)
+                        python_bin = shutil.which('python') or shutil.which('python3') or shutil.which('py')
+                        if python_bin:
+                            cmd = [python_bin, str(updater_script), '--target', str(current_exe), '--new', str(download_path), '--wait-pid', str(os.getpid()), '--restart']
+                        else:
+                            logger.error("No bundled updater and no python in PATH; cannot self-update from frozen exe")
+                            QtWidgets.QMessageBox.warning(self, translator.t('messages.update.title'), translator.t('messages.update.no_updater'))
+                            return
+                else:
+                    # Running from source/interpreter: use current python interpreter
+                    cmd = [sys.executable, str(updater_script), '--target', str(current_exe), '--new', str(download_path), '--wait-pid', str(os.getpid()), '--restart']
+
+                logger.info(f"Launching updater helper: {cmd}")
                 subprocess.Popen(cmd, creationflags=creationflags)
             except Exception as e:
                 logger.error(f"Failed to launch updater helper: {e}")
