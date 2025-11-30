@@ -12,12 +12,11 @@ except Exception:
     from PyInstaller.utils.hooks import collect_data_files
     Tree = None
 
-# Do NOT collect PySide6 dynamic libs by default (they significantly increase
-# bundle size). We keep data files only if required.
+# Temporarily disable collecting PySide6 data for test builds
+# (this reduces bundle size and avoids PySide-related packaging during tests)
 _pyside6_binaries = []
-_pyside6_datas = collect_data_files('PySide6')
-_pyside6_binaries = []
-_pyside6_datas = collect_data_files('PySide6')
+_pyside6_datas = []
+# PySide6 collection intentionally disabled for test builds
 
 # Prepare datas list and include updater onedir distribution whether Tree is available or not
 datas_list = [
