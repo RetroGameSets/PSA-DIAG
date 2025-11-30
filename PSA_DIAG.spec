@@ -18,7 +18,7 @@ a = Analysis(
         ('style.qss', '.'),
         ('icons/*.svg', 'icons'),
         ('icons/*.png', 'icons'),
-        ('tools/7z.exe', 'tools'),
+        ('tools/*.*', 'tools'),
         ('lang/*.json', 'lang'),
         ('config/*.json', 'config'),
     ] + _pyside6_datas,
