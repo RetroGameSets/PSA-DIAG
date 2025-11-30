@@ -113,6 +113,11 @@
     "update": {
       "title": "Update Available",
       "available": "A new version of PSA-DIAG is available!\n\nCurrent version: {current}\nLatest version: {latest}\n\nDo you want to download it?",
+      "no_asset": "Could not find a downloadable .exe asset in the latest release.",
+      "no_updater": "Updater helper not found. Update cannot proceed.",
+      "launch_failed": "Failed to launch updater: {error}",
+      "started": "Update started. The application will now close so the updater can replace the executable.",
+      "failed": "Self-update failed: {error}",
       "error": "Error",
       "fetch_failed": "Failed to fetch last version: {error}"
     },

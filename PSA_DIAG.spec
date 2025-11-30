@@ -15,6 +15,7 @@ a = Analysis(
     pathex=[],
     binaries=_pyside6_binaries,
     datas=[
+        ('updater.py', '.'),
         ('style.qss', '.'),
         ('icons/*.svg', 'icons'),
         ('icons/*.png', 'icons'),

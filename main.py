@@ -25,7 +25,7 @@ else:
 # Persistent config directory (where we save preferences). Use APPDATA on Windows 
 CONFIG_DIR = Path(os.getenv('APPDATA', Path.home())) / 'PSA_DIAG'
 CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-APP_VERSION = "2.1.0.4"
+APP_VERSION = "2.1.0.5"
 URL_LAST_VERSION_PSADIAG = "https://psa-diag.fr/diagbox/install/last_version_psadiag.json"
 URL_LAST_VERSION_DIAGBOX = "https://psa-diag.fr/diagbox/install/last_version_diagbox.json"
 
@@ -1226,14 +1226,99 @@ class MainWindow(QtWidgets.QWidget):
                     )
                     
                     if reply == QtWidgets.QMessageBox.StandardButton.Yes:
-                        logger.info("User accepted update, opening download page")
-                        import webbrowser
-                        webbrowser.open("https://github.com/RetroGameSets/PSA-DIAG/releases/latest")
+                        logger.info("User accepted update, performing automatic download and update")
+                        # Perform automatic download of the latest release asset and run updater
+                        try:
+                            QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.CursorShape.WaitCursor)
+                            self.perform_self_update(latest_version)
+                        finally:
+                            QtWidgets.QApplication.restoreOverrideCursor()
                 else:
                     logger.info("App is up to date")
         except Exception as e:
             # Silently fail if update check fails (no internet, server down, etc.)
             logger.warning(f"Update check failed: {e}")
+
+    def perform_self_update(self, latest_version):
+        """Download the latest release .exe from GitHub and invoke the updater helper.
+
+        Note: This implementation uses the GitHub Releases API to locate a release asset
+        that looks like an executable (.exe). It downloads to `CONFIG_DIR/updates/`.
+        It then launches the `updater.py` helper (bundled in the project) which will
+        wait for this process to exit, replace the running exe, and optionally restart it.
+        """
+        try:
+            api_url = "https://api.github.com/repos/RetroGameSets/PSA-DIAG/releases/latest"
+            logger.info(f"Querying GitHub API for latest release: {api_url}")
+            r = requests.get(api_url, timeout=10)
+            r.raise_for_status()
+            release = r.json()
+
+            # Find a downloadable .exe asset
+            exe_asset = None
+            for asset in release.get('assets', []):
+                name = asset.get('name', '')
+                if name.lower().endswith('.exe'):
+                    exe_asset = asset
+                    break
+
+            if not exe_asset:
+                QtWidgets.QMessageBox.warning(self, translator.t('messages.update.title'), translator.t('messages.update.no_asset'))
+                return
+
+            download_url = exe_asset.get('browser_download_url')
+            if not download_url:
+                QtWidgets.QMessageBox.warning(self, translator.t('messages.update.title'), translator.t('messages.update.no_asset'))
+                return
+
+            updates_dir = CONFIG_DIR / 'updates'
+            updates_dir.mkdir(parents=True, exist_ok=True)
+            target_name = exe_asset.get('name') or f"PSA-DIAG-{latest_version}.exe"
+            download_path = str(updates_dir / target_name)
+
+            # Download with progress (simple)
+            logger.info(f"Downloading update asset: {download_url} -> {download_path}")
+            with requests.get(download_url, stream=True, timeout=30) as resp:
+                resp.raise_for_status()
+                with open(download_path, 'wb') as f:
+                    for chunk in resp.iter_content(chunk_size=8192):
+                        if chunk:
+                            f.write(chunk)
+
+            logger.info(f"Download complete: {download_path}")
+
+            # Launch updater helper and exit
+            updater_script = BASE / 'updater.py'
+            if not updater_script.exists():
+                # Fallback: use embedded updater in CONFIG_DIR if present
+                updater_script = CONFIG_DIR / 'updater.py'
+
+            if not updater_script.exists():
+                QtWidgets.QMessageBox.warning(self, translator.t('messages.update.title'), translator.t('messages.update.no_updater'))
+                return
+
+            # Determine current executable to replace
+            current_exe = sys.executable if getattr(sys, 'frozen', False) else os.path.abspath(sys.argv[0])
+
+            # Spawn updater: passes --wait-pid so updater waits for this process to exit
+            cmd = [sys.executable, str(updater_script), '--target', str(current_exe), '--new', str(download_path), '--wait-pid', str(os.getpid()), '--restart']
+            logger.info(f"Launching updater helper: {cmd}")
+
+            creationflags = subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
+            try:
+                subprocess.Popen(cmd, creationflags=creationflags)
+            except Exception as e:
+                logger.error(f"Failed to launch updater helper: {e}")
+                QtWidgets.QMessageBox.warning(self, translator.t('messages.update.title'), translator.t('messages.update.launch_failed', error=str(e)))
+                return
+
+            # Inform user and quit application to allow updater to replace the exe
+            QtWidgets.QMessageBox.information(self, translator.t('messages.update.title'), translator.t('messages.update.started'))
+            QtWidgets.QApplication.quit()
+
+        except Exception as e:
+            logger.error(f"Self-update failed: {e}", exc_info=True)
+            QtWidgets.QMessageBox.warning(self, translator.t('messages.update.title'), translator.t('messages.update.failed', error=str(e)))
 
     def download_diagbox(self):
         logger.info("Download Diagbox button clicked")

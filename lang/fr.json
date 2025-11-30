@@ -113,6 +113,11 @@
     "update": {
       "title": "Mise à jour Disponible",
       "available": "Une nouvelle version de PSA-DIAG est disponible !\n\nVersion actuelle: {current}\nDernière version: {latest}\n\nVoulez-vous la télécharger ?",
+      "no_asset": "Impossible de trouver un fichier .exe téléchargeable dans la dernière release.",
+      "no_updater": "Le programme d'updater est introuvable. La mise à jour ne peut pas continuer.",
+      "launch_failed": "Échec du lancement de l'updater : {error}",
+      "started": "Mise à jour lancée. L'application va maintenant se fermer pour permettre à l'updater de remplacer l'exécutable.",
+      "failed": "Échec de la mise à jour automatique : {error}",
       "error": "Erreur",
       "fetch_failed": "Échec de récupération de la dernière version : {error}"
     },
