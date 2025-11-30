@@ -64,6 +64,8 @@
     },
     "install": {
       "title": "Installation",
+      "must_clean": "Une version de Diagbox ({installed}) est déjà présente. Vous devez nettoyer avant d'installer.",
+      "must_clean_tooltip": "Impossible d'installer tant que Diagbox {installed} est présent.Nettoyer d'abord.",
       "file_not_found": "Fichier Diagbox introuvable.\n\nVersion: {version}\nChemin attendu: {path}\n\nVeuillez d'abord télécharger cette version.",
       "success": "Diagbox installé avec succès sur C:.",
       "warnings": "Installation terminée avec des avertissements :\n\n{warnings}\n\nDiagbox a été installé sur C:.",

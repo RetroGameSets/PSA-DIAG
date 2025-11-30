@@ -64,6 +64,8 @@
     },
     "install": {
       "title": "Install",
+      "must_clean": "A Diagbox version ({installed}) is already present. You must run Clean before installing.",
+      "must_clean_tooltip": "Cannot install while Diagbox {installed} is present. Clean first.",
       "file_not_found": "Diagbox file not found.\n\nVersion: {version}\nExpected path: {path}\n\nPlease download this version first.",
       "success": "Diagbox installed successfully to C:.",
       "warnings": "Installation completed with warnings:\n\n{warnings}\n\nDiagbox has been installed to C:.",

@@ -25,7 +25,7 @@ else:
 # Persistent config directory (where we save preferences). Use APPDATA on Windows 
 CONFIG_DIR = Path(os.getenv('APPDATA', Path.home())) / 'PSA_DIAG'
 CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-APP_VERSION = "2.1.0.3"
+APP_VERSION = "2.1.0.4"
 URL_LAST_VERSION_PSADIAG = "https://psa-diag.fr/diagbox/install/last_version_psadiag.json"
 URL_LAST_VERSION_DIAGBOX = "https://psa-diag.fr/diagbox/install/last_version_diagbox.json"
 
@@ -340,73 +340,105 @@ class InstallThread(QtCore.QThread):
             logger.info(f"Starting installation from: {self.path}")
             extraction_errors = []
             
-            # Use 7z.exe for much faster extraction
-            seven_zip_exe = BASE / "tools" / "7z.exe"
-            
-            if not seven_zip_exe.exists():
-                logger.error(f"7z.exe not found at {seven_zip_exe}")
-                self.finished.emit(False, f"7z.exe not found at {seven_zip_exe}")
-                return
-            
-            logger.info("Starting 7z extraction...")
-            self.progress.emit(0)
-            
+            # Prefer bundled 7za, then fallback to system-installed 7za
+            candidates = []
+            bundled_7za = BASE / "tools" / "7za.exe"
+            if bundled_7za.exists():
+                candidates.append(str(bundled_7za))
+
+            # Add system command '7za' as fallback
             try:
-                # Run 7z.exe with real-time output
-                # -bsp1 = show progress in stdout
-                self.process = subprocess.Popen(
-                    [str(seven_zip_exe), "x", self.path, "-oC:\\", "-y", "-bsp1"],
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    text=True,
-                    bufsize=1,
-                    universal_newlines=True,
-                    creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
-                )
-                
-                # Read output in real-time to get progress
-                while True:
-                    output = self.process.stdout.readline()
-                    if output == '' and self.process.poll() is not None:
+                if shutil.which("7za"):
+                    candidates.append("7za")
+            except Exception:
+                pass
+
+            if not candidates:
+                logger.error("No 7za executable found (checked bundled tools and PATH)")
+                self.finished.emit(False, "7za executable not found")
+                return
+
+            logger.info(f"Starting extraction using candidates: {candidates}")
+            self.progress.emit(0)
+
+            tried = []
+            extraction_succeeded = False
+            last_errors = []
+
+            # Try each candidate until one succeeds
+            for exe in candidates:
+                tried.append(exe)
+                logger.info(f"Attempting extraction with: {exe}")
+                try:
+                    self.process = subprocess.Popen(
+                        [exe, "x", self.path, "-oC:\\", "-y", "-bsp1"],
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        text=True,
+                        bufsize=1,
+                        universal_newlines=True,
+                        creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
+                    )
+
+                    stdout_lines = []
+                    # Read output in real-time to get progress
+                    while True:
+                        output = self.process.stdout.readline()
+                        if output == '' and self.process.poll() is not None:
+                            break
+                        if output:
+                            stdout_lines.append(output)
+                            # Log the output for debugging
+                            logger.debug(f"7z output ({exe}): {output.strip()}")
+
+                            # 7z outputs progress like "1% 2909 - filename"
+                            line = output.strip()
+                            if '%' in line and ' - ' in line:
+                                try:
+                                    percent_str = line.split('%')[0].strip()
+                                    if percent_str.isdigit():
+                                        percent = int(percent_str)
+                                        logger.debug(f"Progress extracted: {percent}%")
+                                        self.progress.emit(percent)
+
+                                    filename = line.split(' - ', 1)[1] if ' - ' in line else ''
+                                    if filename:
+                                        self.file_progress.emit(filename)
+                                except Exception as e:
+                                    logger.warning(f"Error parsing progress: {e}")
+                                    pass
+
+                    # After process ends, collect stderr and decide
+                    return_code = self.process.poll()
+                    stderr = self.process.stderr.read() if self.process.stderr is not None else ''
+                    combined_output = '\n'.join(stdout_lines) + '\n' + (stderr or '')
+
+                    if return_code == 0 and "Can't open as archive" not in combined_output:
+                        logger.info(f"Extraction succeeded with: {exe}")
+                        extraction_succeeded = True
                         break
-                    if output:
-                        # Log the output for debugging
-                        logger.debug(f"7z output: {output.strip()}")
-                        
-                        # 7z outputs progress like "1% 2909 - filename"
-                        output = output.strip()
-                        if '%' in output and ' - ' in output:
-                            try:
-                                # Extract percentage from beginning of line
-                                percent_str = output.split('%')[0].strip()
-                                if percent_str.isdigit():
-                                    percent = int(percent_str)
-                                    logger.debug(f"Progress extracted: {percent}%")
-                                    self.progress.emit(percent)
-                                
-                                # Extract filename after " - "
-                                filename = output.split(' - ', 1)[1] if ' - ' in output else ''
-                                if filename:
-                                    self.file_progress.emit(filename)
-                            except Exception as e:
-                                logger.warning(f"Error parsing progress: {e}")
-                                pass
-                
-                # Get return code
-                return_code = self.process.poll()
-                stderr = self.process.stderr.read()
-                
-                if return_code != 0:
-                    if "permission" in stderr.lower() or "access" in stderr.lower():
-                        extraction_errors.append("Some files skipped due to permission errors")
-                    elif stderr:
-                        extraction_errors.append(f"7z error: {stderr[:200]}")
-                
-            except Exception as e:
-                extraction_errors.append(f"Extraction error: {str(e)}")
+                    else:
+                        logger.warning(f"Extraction failed with {exe}: return_code={return_code}, stderr={stderr[:200]}")
+                        last_errors.append(f"{exe}: {stderr[:400]}")
+                        # try next candidate
+                        continue
+
+                except Exception as e:
+                    logger.error(f"Extraction attempt with {exe} raised exception: {e}")
+                    last_errors.append(f"{exe}: {str(e)}")
+                    continue
+
+            # After trying all candidates
+            if not extraction_succeeded:
+                if any('permission' in (err or '').lower() for err in last_errors):
+                    extraction_errors.append("Some files skipped due to permission errors")
+                elif last_errors:
+                    extraction_errors.append("7z extraction failed: " + ' | '.join(last_errors[:3]))
+                else:
+                    extraction_errors.append("Unknown extraction failure")
             
             self.progress.emit(100)
-            
+
             # Build result message
             if extraction_errors:
                 error_summary = "\n".join(extraction_errors)
@@ -752,6 +784,19 @@ class MainWindow(QtWidgets.QWidget):
             if hasattr(self, 'header_downloaded') and self.header_downloaded:
                 self.header_downloaded.setVisible(False)
 
+            # Update install button state based on installed version
+            try:
+                installed_version = self.check_installed_version()
+                if hasattr(self, 'install_button'):
+                    if installed_version:
+                        self.install_button.setEnabled(False)
+                        self.install_button.setToolTip(translator.t('messages.install.must_clean_tooltip', installed=installed_version))
+                    else:
+                        self.install_button.setEnabled(True)
+                        self.install_button.setToolTip("")
+            except Exception:
+                pass
+
     def update_install_progress(self, value):
         """Update installation progress bar"""
         # Update footer progress bar
@@ -775,6 +820,20 @@ class MainWindow(QtWidgets.QWidget):
 
     def install_diagbox(self):
         logger.info("Install Diagbox initiated")
+        # If a Diagbox version is already installed, require cleaning first
+        installed_version = self.check_installed_version()
+        if installed_version:
+            reply = QtWidgets.QMessageBox.question(
+                self,
+                translator.t('messages.install.title'),
+                translator.t('messages.install.must_clean', installed=installed_version),
+                QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No,
+                QtWidgets.QMessageBox.StandardButton.Yes
+            )
+            if reply == QtWidgets.QMessageBox.StandardButton.Yes:
+                # Start the cleaning flow and return; user must run install after cleaning
+                self.clean_diagbox()
+            return
         # Get selected version from combo box
         if hasattr(self, 'version_combo'):
             selected_data = self.version_combo.currentData()
@@ -1594,6 +1653,7 @@ class MainWindow(QtWidgets.QWidget):
                 self.download_button = b
                 b.clicked.connect(self.download_diagbox)
             elif action == "install":
+                self.install_button = b
                 b.clicked.connect(self.install_diagbox)
             elif action == "clean":
                 b.clicked.connect(self.clean_diagbox)
@@ -1630,6 +1690,18 @@ class MainWindow(QtWidgets.QWidget):
         
         layout.addLayout(sub)
         layout.addLayout(right)
+
+        # Disable install button if a Diagbox version is already installed
+        try:
+            installed_version = self.check_installed_version()
+            if installed_version and hasattr(self, 'install_button'):
+                self.install_button.setEnabled(False)
+                self.install_button.setToolTip(translator.t('messages.install.must_clean_tooltip', installed=installed_version))
+            elif hasattr(self, 'install_button'):
+                self.install_button.setEnabled(True)
+                self.install_button.setToolTip("")
+        except Exception:
+            pass
 
         return w
 

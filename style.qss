@@ -102,10 +102,35 @@ QPushButton:pressed {
     border: 1px solid #0e9aa7;
 }
 
+/* Disabled buttons: clearly grayed out, no hover/press visual effects, default cursor */
 QPushButton:disabled {
-    background-color: #1d2127;
-    border: 1px solid #2a2e36;
-    color: #5a5f68;
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                                stop:0 #2b2f33, stop:1 #23262a);
+    border: 1px solid #2f3337;
+    color: #8a8f95;
+    padding: 10px 16px;
+    border-radius: 8px;
+    font-weight: 500;
+    cursor: default;
+}
+
+/* Ensure disabled buttons don't respond visually to hover/pressed states */
+QPushButton:disabled:hover,
+QPushButton:disabled:pressed {
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                                stop:0 #2b2f33, stop:1 #23262a);
+    border: 1px solid #2f3337;
+    color: #8a8f95;
+}
+
+/* Specific rule for checkable sidebar buttons when disabled */
+QPushButton[checkable="true"]:disabled {
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                                stop:0 #26292d, stop:1 #1f2124);
+    border: 2px solid #2a2e32;
+    color: #757a7f;
+    icon-size: 24px;
+    cursor: default;
 }
 
 /* Action buttons with more volume */
@@ -130,6 +155,31 @@ QPushButton#actionButton:pressed {
     background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
                                 stop:0 #0c8895, stop:1 #0a7683);
     border: 2px solid #0e9aa7;
+}
+
+/* Specific disabled overrides for more specific button selectors */
+QPushButton#actionButton:disabled {
+    background: #26282b;
+    border: 2px solid #2b2e31;
+    color: #8a8f95;
+    padding: 12px 18px;
+    border-radius: 10px;
+    font-weight: 600;
+    cursor: default;
+}
+
+QPushButton#titleButton:disabled {
+    background-color: transparent;
+    border: 1px solid #2b2f33;
+    color: #8a8f95;
+    padding: 6px 10px;
+    cursor: default;
+}
+
+QMessageBox QPushButton:disabled {
+    background: #2b2f33;
+    border: 1px solid #2f3337;
+    color: #8a8f95;
 }
 
 /* Progress bar with glow effect */
