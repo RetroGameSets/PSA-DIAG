@@ -22,12 +22,8 @@ if getattr(sys, 'frozen', False):
 else:
     BASE = Path(__file__).resolve().parent
 
-# Persistent config directory (where we save preferences). Use APPDATA on Windows 
-CONFIG_DIR = Path(os.getenv('APPDATA', Path.home())) / 'PSA_DIAG'
-CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-APP_VERSION = "2.1.0.7"
-URL_LAST_VERSION_PSADIAG = "https://psa-diag.fr/diagbox/install/last_version_psadiag.json"
-URL_LAST_VERSION_DIAGBOX = "https://psa-diag.fr/diagbox/install/last_version_diagbox.json"
+# Centralized configuration (moved to `config.py`)
+from config import CONFIG_DIR, APP_VERSION, URL_LAST_VERSION_PSADIAG, URL_LAST_VERSION_DIAGBOX
 
 # Translation system
 class Translator:

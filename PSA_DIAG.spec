@@ -28,6 +28,7 @@ datas_list = [
     ('tools/*.dll', 'tools'),
     ('lang/*.json', 'lang'),
     ('config/*.json', 'config'),
+    ('config.py', '.'),
 ]
 
 # If PyInstaller provides Tree, use it to include the whole folder. Otherwise fall back to manual listing.
