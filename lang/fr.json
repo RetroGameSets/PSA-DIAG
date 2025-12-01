@@ -23,12 +23,13 @@
     "hide_console": "Masquer la Console",
     "minimize": "-",
     "close": "X",
-    "open_log": "Ouvrir les logs"
+    "open_log": "Ouvrir les logs",
+    "dismiss": "Fermer"
   },
   "labels": {
     "installed_version": "Version Installée : {version}",
     "last_version": "Dernière Version : {version}",
-    "downloaded_versions": "Téléchargé : {versions}",
+    "downloaded_versions": "Fichiers déjà téléchargés : {versions}",
     "not_installed": "Non installé",
     "select_version": "Sélectionner Version :",
     "auto_install": "Auto Installation après téléchargement :",
@@ -64,6 +65,9 @@
     },
     "install": {
       "title": "Installation",
+      "available": "Une version plus récente est disponible : {latest} (installée: {installed})",
+      "up_to_date": "Vous avez la dernière version de Diagbox disponible installée.",
+      "no_installed": "Aucune installation détectée. Version disponible en ligne : {latest}",
       "must_clean": "Une version de Diagbox ({installed}) est déjà présente. Vous devez nettoyer avant d'installer.",
       "must_clean_tooltip": "Impossible d'installer tant que Diagbox {installed} est présent.Nettoyer d'abord.",
       "file_not_found": "Fichier Diagbox introuvable.\n\nVersion: {version}\nChemin attendu: {path}\n\nVeuillez d'abord télécharger cette version.",

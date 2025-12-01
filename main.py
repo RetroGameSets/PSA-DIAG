@@ -13,6 +13,7 @@ import shutil
 import ctypes
 import subprocess
 import logging
+import re
 from datetime import datetime
 import json
 
@@ -23,7 +24,7 @@ else:
     BASE = Path(__file__).resolve().parent
 
 # Centralized configuration (moved to `config.py`)
-from config import CONFIG_DIR, APP_VERSION, URL_LAST_VERSION_PSADIAG, URL_LAST_VERSION_DIAGBOX, URL_VERSION_OPTIONS
+from config import CONFIG_DIR, APP_VERSION, URL_LAST_VERSION_PSADIAG, URL_LAST_VERSION_DIAGBOX, URL_VERSION_OPTIONS, URL_REMOTE_MESSAGES
 
 # Translation system
 class Translator:
@@ -558,6 +559,16 @@ class MainWindow(QtWidgets.QWidget):
         # Version options: load from remote JSON (configured in `config.URL_VERSION_OPTIONS`)
         # Falls back to the built-in defaults if remote fetch fails.
         self.version_options = self.load_version_options()
+        # Remote messages/banners (for homepage notifications)
+        self.remote_messages = []
+        try:
+            # initial load and periodic refresh
+            self.load_remote_messages()
+            self.message_timer = QtCore.QTimer(self)
+            self.message_timer.timeout.connect(self.load_remote_messages)
+            self.message_timer.start(60 * 1000)  # refresh every 60s
+        except Exception:
+            pass
 
         # Connect signals
         self.download_finished.connect(self.on_download_finished)
@@ -608,6 +619,442 @@ class MainWindow(QtWidgets.QWidget):
         except Exception as e:
             logger.warning(f"Failed to load version options from remote JSON: {e}")
             return defaults
+
+    def load_remote_messages(self):
+        """Load remote messages/banners JSON and update the homepage banner.
+
+        Expected JSON: list of objects like:
+        {
+          "id": "promo1",
+          "lang": {"en": {"text":"Hello","link":"https://..."}, "fr": {...}},
+          "start": "2025-12-01T00:00:00Z",
+          "end": "2025-12-31T23:59:59Z",
+          "priority": 10
+        }
+        """
+        try:
+            logger.info(f"Loading remote messages from: {URL_REMOTE_MESSAGES}")
+            r = requests.get(URL_REMOTE_MESSAGES, timeout=6)
+            r.raise_for_status()
+            data = r.json()
+            messages = []
+            if isinstance(data, dict):
+                # allow single-object root
+                data = [data]
+            if isinstance(data, list):
+                for item in data:
+                    try:
+                        mid = item.get('id') or item.get('name')
+                        langmap = item.get('lang') or item.get('texts') or {}
+                        start = item.get('start')
+                        end = item.get('end')
+                        priority = int(item.get('priority', 0))
+                        messages.append({'id': mid, 'lang': langmap, 'start': start, 'end': end, 'priority': priority, 'raw': item})
+                    except Exception:
+                        continue
+            # keep in memory and update UI
+            self.remote_messages = sorted(messages, key=lambda x: x.get('priority', 0), reverse=True)
+            QtCore.QTimer.singleShot(50, self.update_global_banner)
+        except Exception as e:
+            logger.debug(f"Failed to load remote messages: {e}")
+
+    def update_global_banner(self):
+        """Create or update a homepage banner from `self.remote_messages`.
+
+        Picks the highest-priority active message and displays it on the
+        home/config page (stack index 0). Supports `lang` map with per-
+        language text and optional `link`/`link_text`.
+        """
+        try:
+            if not getattr(self, 'remote_messages', None):
+                # hide existing banner if nothing to show
+                if hasattr(self, 'home_banner'):
+                    try:
+                        self.home_banner.setVisible(False)
+                    except Exception:
+                        pass
+                return
+
+            # collect all messages that apply to the home page and are active
+            now = QtCore.QDateTime.currentDateTimeUtc()
+            candidates = []
+            for msg in self.remote_messages:
+                raw = msg.get('raw', {})
+                display_on = raw.get('display_on') or raw.get('display') or []
+                if display_on and 'home' not in display_on:
+                    continue
+                # time window
+                start = raw.get('start')
+                end = raw.get('end')
+                if start:
+                    try:
+                        st = QtCore.QDateTime.fromString(start, QtCore.Qt.ISODate)
+                        if st.isValid() and st > now:
+                            continue
+                    except Exception:
+                        pass
+                if end:
+                    try:
+                        et = QtCore.QDateTime.fromString(end, QtCore.Qt.ISODate)
+                        if et.isValid() and et < now:
+                            continue
+                    except Exception:
+                        pass
+                candidates.append(msg)
+
+            if not candidates:
+                if hasattr(self, 'home_banner'):
+                    try:
+                        self.home_banner.setVisible(False)
+                    except Exception:
+                        pass
+                return
+
+            # Save candidates (ordered by priority already) and start rotation
+            self.home_messages = candidates
+            self.home_banner_index = 0
+
+            # ensure banner exists / create if needed
+            home_widget = self.stack.widget(0)
+            if home_widget is None:
+                return
+            layout = home_widget.layout()
+            if not layout:
+                return
+
+            if not hasattr(self, 'home_banner'):
+                self.home_banner = QtWidgets.QFrame()
+                self.home_banner.setObjectName('installBanner')
+                main_banner_layout = QtWidgets.QVBoxLayout(self.home_banner)
+                main_banner_layout.setContentsMargins(10,10,10,10)
+                main_banner_layout.setSpacing(8)
+                
+                # Top row: arrows + message content
+                bann_layout = QtWidgets.QHBoxLayout()
+                bann_layout.setSpacing(8)
+                
+                # Left arrow in vertical container
+                left_arrow_container = QtWidgets.QVBoxLayout()
+                left_arrow_container.addStretch()
+                left_arrow = QtWidgets.QPushButton('\u276E')
+                left_arrow.setObjectName('bannerArrow')
+                left_arrow.setFixedSize(32, 32)
+                left_arrow.clicked.connect(self._prev_home_banner)
+                left_arrow_container.addWidget(left_arrow)
+                left_arrow_container.addStretch()
+                bann_layout.addLayout(left_arrow_container)
+                self.home_banner_left_arrow = left_arrow
+                
+                # Center content (message + link + dots)
+                center_layout = QtWidgets.QVBoxLayout()
+                center_layout.setSpacing(8)
+                
+                lbl = QtWidgets.QLabel("")
+                lbl.setObjectName('installBannerLabel')
+                lbl.setWordWrap(True)
+                lbl.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+                center_layout.addWidget(lbl)
+                
+                # Link button row (centered)
+                link_layout = QtWidgets.QHBoxLayout()
+                link_layout.addStretch()
+                self.home_banner_link_layout = link_layout
+                link_layout.addStretch()
+                center_layout.addLayout(link_layout)
+                
+                # Pagination dots row (centered)
+                dots_layout = QtWidgets.QHBoxLayout()
+                dots_layout.setSpacing(6)
+                dots_layout.addStretch()
+                self.home_banner_dots_layout = dots_layout
+                self.home_banner_dots = []
+                dots_layout.addStretch()
+                center_layout.addLayout(dots_layout)
+                
+                bann_layout.addLayout(center_layout, 1)
+                
+                # placeholder for link
+                self.home_banner_link = None
+                
+                # Right arrow in vertical container
+                right_arrow_container = QtWidgets.QVBoxLayout()
+                right_arrow_container.addStretch()
+                right_arrow = QtWidgets.QPushButton('\u276F')
+                right_arrow.setObjectName('bannerArrow')
+                right_arrow.setFixedSize(32, 32)
+                right_arrow.clicked.connect(self._next_home_banner)
+                right_arrow_container.addWidget(right_arrow)
+                right_arrow_container.addStretch()
+                bann_layout.addLayout(right_arrow_container)
+                self.home_banner_right_arrow = right_arrow
+                
+                main_banner_layout.addLayout(bann_layout)
+                
+                # Use opacity effect instead of drop shadow to allow fade animations
+                try:
+                    opacity_effect = QtWidgets.QGraphicsOpacityEffect(self.home_banner)
+                    opacity_effect.setOpacity(1.0)
+                    self.home_banner.setGraphicsEffect(opacity_effect)
+                    self._banner_opacity_effect = opacity_effect
+                except Exception:
+                    pass
+                layout.insertWidget(0, self.home_banner)
+                self.home_banner_label = lbl
+
+            # start a rotation timer if multiple messages
+            try:
+                if hasattr(self, 'home_banner_timer') and self.home_banner_timer.isActive():
+                    self.home_banner_timer.stop()
+                else:
+                    self.home_banner_timer = QtCore.QTimer(self)
+                    self.home_banner_timer.timeout.connect(self._advance_home_banner)
+                if len(self.home_messages) > 1:
+                    self.home_banner_timer.start(8000)
+                else:
+                    try:
+                        self.home_banner_timer.stop()
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+            # Update pagination dots
+            try:
+                self._update_banner_dots()
+            except Exception:
+                pass
+            
+            # show first message now
+            try:
+                self._show_home_message(self.home_banner_index)
+            except Exception as e:
+                logger.debug(f"show_home_message error: {e}")
+        except Exception as e:
+            logger.debug(f"update_global_banner error: {e}")
+
+    def _show_home_message(self, index):
+        """Display message at `index` from `self.home_messages` with slide transition."""
+        try:
+            if not getattr(self, 'home_messages', None):
+                return
+            msg = self.home_messages[index]
+            raw = msg.get('raw', {})
+            langmap = msg.get('lang', {})
+            lang_code = translator.language if hasattr(translator, 'language') else 'en'
+            text_entry = langmap.get(lang_code) or langmap.get('en') or {}
+            text = text_entry.get('text') if isinstance(text_entry, dict) else text_entry or str(text_entry)
+            link = text_entry.get('link') if isinstance(text_entry, dict) else None
+            link_text = text_entry.get('link_text') if isinstance(text_entry, dict) else None
+
+            # Stop any running animation
+            if hasattr(self, '_banner_animation') and self._banner_animation:
+                try:
+                    self._banner_animation.stop()
+                except Exception:
+                    pass
+
+            # Create fade out effect first (if content exists)
+            if hasattr(self, 'home_banner_label') and self.home_banner_label.text():
+                try:
+                    # Create or reuse opacity effect
+                    if not hasattr(self, '_banner_opacity_effect'):
+                        self._banner_opacity_effect = QtWidgets.QGraphicsOpacityEffect(self.home_banner)
+                        self.home_banner.setGraphicsEffect(self._banner_opacity_effect)
+                    
+                    opacity_effect = self._banner_opacity_effect
+                    
+                    # Fade out animation
+                    fade_out = QtCore.QPropertyAnimation(opacity_effect, b"opacity")
+                    fade_out.setDuration(250)
+                    fade_out.setStartValue(1.0)
+                    fade_out.setEndValue(0.0)
+                    fade_out.setEasingCurve(QtCore.QEasingCurve.Type.InOutQuad)
+                    
+                    # Update content at end of fade out
+                    def update_content():
+                        try:
+                            self.home_banner_label.setText(text or '')
+                            # Update link button
+                            if link:
+                                if not getattr(self, 'home_banner_link', None):
+                                    btn = QtWidgets.QPushButton(link_text or translator.t('buttons.download'))
+                                    btn.setObjectName('bannerDownload')
+                                    btn._url = link
+                                    btn.clicked.connect(self._open_button_url)
+                                    # Insert in the centered link layout (between the two stretches)
+                                    self.home_banner_link_layout.insertWidget(1, btn)
+                                    self.home_banner_link = btn
+                                else:
+                                    self.home_banner_link._url = link
+                                    self.home_banner_link.setText(link_text or translator.t('buttons.download'))
+                                    self.home_banner_link.setVisible(True)
+                            else:
+                                if getattr(self, 'home_banner_link', None):
+                                    self.home_banner_link.setVisible(False)
+                            
+                            # Fade back in
+                            fade_in = QtCore.QPropertyAnimation(opacity_effect, b"opacity")
+                            fade_in.setDuration(250)
+                            fade_in.setStartValue(0.0)
+                            fade_in.setEndValue(1.0)
+                            fade_in.setEasingCurve(QtCore.QEasingCurve.Type.InOutQuad)
+                            fade_in.start()
+                            self._banner_animation = fade_in
+                        except Exception as e:
+                            logger.debug(f"Fade in error: {e}")
+                    
+                    fade_out.finished.connect(update_content)
+                    fade_out.start()
+                    self._banner_animation = fade_out
+                except Exception as e:
+                    logger.debug(f"Animation error: {e}")
+                    # Fallback to instant update
+                    self._update_banner_content_instant(text, link, link_text)
+            else:
+                # First message: no animation needed
+                self._update_banner_content_instant(text, link, link_text)
+
+            try:
+                self.home_banner.setVisible(True)
+            except Exception:
+                pass
+        except Exception as e:
+            logger.debug(f"_show_home_message error: {e}")
+
+    def _update_banner_content_instant(self, text, link, link_text):
+        """Update banner content without animation (fallback)."""
+        try:
+            self.home_banner_label.setText(text or '')
+            if link:
+                if not getattr(self, 'home_banner_link', None):
+                    btn = QtWidgets.QPushButton(link_text or translator.t('buttons.download'))
+                    btn.setObjectName('bannerDownload')
+                    btn._url = link
+                    btn.clicked.connect(self._open_button_url)
+                    # Insert in the centered link layout (between the two stretches)
+                    self.home_banner_link_layout.insertWidget(1, btn)
+                    self.home_banner_link = btn
+                else:
+                    self.home_banner_link._url = link
+                    self.home_banner_link.setText(link_text or translator.t('buttons.download'))
+                    self.home_banner_link.setVisible(True)
+            else:
+                if getattr(self, 'home_banner_link', None):
+                    self.home_banner_link.setVisible(False)
+        except Exception:
+            pass
+
+    def _advance_home_banner(self):
+        try:
+            if not getattr(self, 'home_messages', None):
+                return
+            self.home_banner_index = (self.home_banner_index + 1) % len(self.home_messages)
+            self._show_home_message(self.home_banner_index)
+            self._update_banner_dots()
+        except Exception as e:
+            logger.debug(f"_advance_home_banner error: {e}")
+    
+    def _next_home_banner(self):
+        """Navigate to next banner message manually."""
+        try:
+            if not getattr(self, 'home_messages', None):
+                return
+            # Stop auto rotation timer when user manually navigates
+            if hasattr(self, 'home_banner_timer') and self.home_banner_timer.isActive():
+                self.home_banner_timer.stop()
+            self.home_banner_index = (self.home_banner_index + 1) % len(self.home_messages)
+            self._show_home_message(self.home_banner_index)
+            self._update_banner_dots()
+            # Restart timer
+            if len(self.home_messages) > 1:
+                self.home_banner_timer.start(8000)
+        except Exception as e:
+            logger.debug(f"_next_home_banner error: {e}")
+    
+    def _prev_home_banner(self):
+        """Navigate to previous banner message manually."""
+        try:
+            if not getattr(self, 'home_messages', None):
+                return
+            # Stop auto rotation timer when user manually navigates
+            if hasattr(self, 'home_banner_timer') and self.home_banner_timer.isActive():
+                self.home_banner_timer.stop()
+            self.home_banner_index = (self.home_banner_index - 1) % len(self.home_messages)
+            self._show_home_message(self.home_banner_index)
+            self._update_banner_dots()
+            # Restart timer
+            if len(self.home_messages) > 1:
+                self.home_banner_timer.start(8000)
+        except Exception as e:
+            logger.debug(f"_prev_home_banner error: {e}")
+    
+    def _update_banner_dots(self):
+        """Update pagination dots to reflect current message index."""
+        try:
+            if not hasattr(self, 'home_banner_dots_layout'):
+                return
+            num_messages = len(getattr(self, 'home_messages', []))
+            if num_messages <= 1:
+                # Hide all dots if only one message
+                for dot in self.home_banner_dots:
+                    dot.setVisible(False)
+                # Hide arrows too
+                if hasattr(self, 'home_banner_left_arrow'):
+                    self.home_banner_left_arrow.setVisible(False)
+                if hasattr(self, 'home_banner_right_arrow'):
+                    self.home_banner_right_arrow.setVisible(False)
+                return
+            
+            # Show arrows
+            if hasattr(self, 'home_banner_left_arrow'):
+                self.home_banner_left_arrow.setVisible(True)
+            if hasattr(self, 'home_banner_right_arrow'):
+                self.home_banner_right_arrow.setVisible(True)
+            
+            # Create or update dots
+            current_index = getattr(self, 'home_banner_index', 0)
+            
+            # Remove extra dots if we have too many
+            while len(self.home_banner_dots) > num_messages:
+                dot = self.home_banner_dots.pop()
+                self.home_banner_dots_layout.removeWidget(dot)
+                dot.deleteLater()
+            
+            # Add missing dots
+            while len(self.home_banner_dots) < num_messages:
+                dot = QtWidgets.QLabel('\u25CF')
+                dot.setObjectName('bannerDot')
+                dot.setFixedSize(10, 10)
+                dot.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+                dot.setStyleSheet('font-size: 10px; color: #888;')
+                # Insert before the second stretch (which is at index len(self.home_banner_dots) + 1)
+                self.home_banner_dots_layout.insertWidget(len(self.home_banner_dots) + 1, dot)
+                self.home_banner_dots.append(dot)
+            
+            # Update dot styles (active vs inactive)
+            for i, dot in enumerate(self.home_banner_dots):
+                dot.setVisible(True)
+                if i == current_index:
+                    dot.setStyleSheet('font-size: 12px; color: #fff; font-weight: bold;')
+                else:
+                    dot.setStyleSheet('font-size: 10px; color: #888;')
+        except Exception as e:
+            logger.debug(f"_update_banner_dots error: {e}")
+
+    def _open_button_url(self):
+        try:
+            sender = self.sender()
+            url = getattr(sender, '_url', None)
+            if not url:
+                return
+            if sys.platform == 'win32':
+                os.startfile(url)
+            elif sys.platform == 'darwin':
+                subprocess.Popen(['open', url])
+            else:
+                subprocess.Popen(['xdg-open', url])
+        except Exception as e:
+            logger.debug(f"_open_button_url error: {e}")
 
     def update_progress(self, value, speed, eta):
         # Update footer progress bar
@@ -798,6 +1245,14 @@ class MainWindow(QtWidgets.QWidget):
         # Refresh install page if installation was successful
         if success:
             self.refresh_install_page()
+            # Update the install banner state now that installation may have changed
+            try:
+                QtCore.QTimer.singleShot(100, self.on_enter_install_page)
+            except Exception:
+                try:
+                    self.on_enter_install_page()
+                except Exception:
+                    pass
         
         # Show message box AFTER re-enabling buttons
         QtWidgets.QMessageBox.information(self, translator.t('messages.install.title'), message)
@@ -943,13 +1398,15 @@ class MainWindow(QtWidgets.QWidget):
         # Check for desktop shortcuts
         shortcuts_to_delete = []
         public_desktop = r"C:\Users\Public\Desktop"
+        # Known public desktop shortcut filenames (include variants)
         shortcut_names = [
             "Diagbox Language Changer.lnk",
+            "Change Diagbox Language.lnk",
             "Diagbox.lnk",
             "PSA Interface Checker.lnk",
-            "Terminate Diagbox Process.lnk"
+            "PSA XS Evolution Interface Checker.lnk",
+            "Terminate Diagbox Process.lnk",
             "Terminate Diagbox Processes.lnk"
-            "PSA XS Evolution Interface Checker.lnk"
         ]
         
         for shortcut in shortcut_names:
@@ -1660,6 +2117,112 @@ class MainWindow(QtWidgets.QWidget):
                 child.setChecked(False)
         button.setChecked(True)
         self.stack.setCurrentIndex(index)
+        # If navigating to install page, check for a newer Diagbox version
+        if index == 1:
+            # small delay to ensure UI has switched
+            QtCore.QTimer.singleShot(100, self.on_enter_install_page)
+
+    def parse_version_to_list(self, version_str):
+        """Extract first numeric version (like '09.186' or '09.85') and
+        convert to list of ints for lexicographic comparison.
+        If no numeric version found, returns [0]."""
+        try:
+            m = re.search(r"(\d+(?:\.\d+)*)", str(version_str))
+            if not m:
+                return [0]
+            parts = [int(x) for x in m.group(1).split('.')]
+            return parts
+        except Exception:
+            return [0]
+
+    def compare_versions(self, a, b):
+        """Compare two version strings (return 1 if a>b, 0 if equal, -1 if a<b).
+        Only numeric parts are compared (extract first numeric sequence).
+        """
+        a_list = self.parse_version_to_list(a)
+        b_list = self.parse_version_to_list(b)
+        # Pad with zeros
+        max_len = max(len(a_list), len(b_list))
+        a_list += [0] * (max_len - len(a_list))
+        b_list += [0] * (max_len - len(b_list))
+        for ai, bi in zip(a_list, b_list):
+            if ai > bi:
+                return 1
+            if ai < bi:
+                return -1
+        return 0
+
+    def get_latest_available_version(self):
+        """Return the version string (raw) from `self.version_options` that
+        is numerically the latest. If none, returns None."""
+        try:
+            best = None
+            for _, version, _url in getattr(self, 'version_options', []):
+                if not best:
+                    best = version
+                    continue
+                if self.compare_versions(version, best) == 1:
+                    best = version
+            return best
+        except Exception as e:
+            logger.debug(f"Error determining latest available version: {e}")
+            return None
+
+    def on_enter_install_page(self):
+        """Called when user navigates to the install page: check installed
+        version vs the latest available and notify if newer exists."""
+        try:
+            installed = self.check_installed_version()
+            latest = self.get_latest_available_version()
+            logger.info(f"on_enter_install_page: installed={installed!r}, latest={latest!r}")
+            if not latest:
+                return
+
+            # Prepare banner text depending on whether Diagbox is installed
+            if not installed:
+                text = translator.t('messages.install.no_installed', latest=latest)
+            else:
+                cmp = self.compare_versions(latest, installed)
+                if cmp == 1:
+                    # latest is newer than installed
+                    text = translator.t('messages.install.available', latest=latest, installed=installed)
+                else:
+                    # Installed is up-to-date or newer; show an up-to-date banner
+                    text = translator.t('messages.install.up_to_date')
+
+            # Populate and show banner (non-blocking) and hide the duplicate
+            # installed/latest labels to avoid repeating the same info.
+            if hasattr(self, 'install_banner_label'):
+                self.install_banner_label.setText(text)
+            if hasattr(self, 'install_banner'):
+                before = self.install_banner.isVisible()
+                logger.info(f"install_banner before visible={before}")
+                self.install_banner.setVisible(True)
+                after = self.install_banner.isVisible()
+                logger.info(f"install_banner after visible={after}")
+            # Show or hide the Download button depending on state. If we are
+            # already up-to-date, hide the download action to avoid confusion.
+            try:
+                if hasattr(self, 'install_banner_download'):
+                    up_to_date_msg = translator.t('messages.install.up_to_date')
+                    if text == up_to_date_msg:
+                        self.install_banner_download.setVisible(False)
+                    else:
+                        self.install_banner_download.setVisible(True)
+            except Exception:
+                pass
+            if hasattr(self, 'header_installed'):
+                try:
+                    self.header_installed.setVisible(False)
+                except Exception:
+                    pass
+            if hasattr(self, 'header_online'):
+                try:
+                    self.header_online.setVisible(False)
+                except Exception:
+                    pass
+        except Exception as e:
+            logger.debug(f"Error while checking install page updates: {e}")
 
     def page_config(self):
         w = QtWidgets.QWidget()
@@ -1726,9 +2289,56 @@ class MainWindow(QtWidgets.QWidget):
         self.header_installed.setObjectName("sectionHeader")
         layout.addWidget(self.header_installed)
 
-        header_online = QtWidgets.QLabel(translator.t('labels.last_version', version=self.last_version_diagbox if self.last_version_diagbox else 'Unknown'))
-        header_online.setObjectName("sectionHeader")
-        layout.addWidget(header_online)
+        # Show the latest numeric version available (prefer version_options data)
+        latest_available = self.get_latest_available_version() or (self.last_version_diagbox if self.last_version_diagbox else 'Unknown')
+        self.header_online = QtWidgets.QLabel(translator.t('labels.last_version', version=latest_available))
+        self.header_online.setObjectName("sectionHeader")
+
+        # Inline non-blocking update banner (hidden by default). This replaces
+        # the previous modal MessageBox notifications when the user enters the
+        # install page. `on_enter_install_page()` will populate and show it.
+        self.install_banner = QtWidgets.QFrame()
+        self.install_banner.setObjectName('installBanner')
+        self.install_banner.setVisible(False)
+        banner_layout = QtWidgets.QHBoxLayout(self.install_banner)
+        banner_layout.setContentsMargins(10,10,10,10)
+        banner_layout.setSpacing(10)
+
+        # Left icon/accent to make banner more visually distinct
+        self.install_banner_icon = QtWidgets.QLabel("\u2139")
+        self.install_banner_icon.setObjectName('installBannerIcon')
+        self.install_banner_icon.setFixedWidth(28)
+        self.install_banner_icon.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        banner_layout.addWidget(self.install_banner_icon)
+
+        self.install_banner_label = QtWidgets.QLabel("")
+        self.install_banner_label.setObjectName('installBannerLabel')
+        self.install_banner_label.setWordWrap(True)
+        banner_layout.addWidget(self.install_banner_label, 1)
+
+        self.install_banner_download = QtWidgets.QPushButton(translator.t('buttons.download'))
+        self.install_banner_download.setObjectName('bannerDownload')
+        self.install_banner_download.clicked.connect(self._banner_download_clicked)
+        banner_layout.addWidget(self.install_banner_download)
+
+        # Dismiss button
+        self.install_banner_dismiss = QtWidgets.QPushButton(translator.t('buttons.dismiss') if hasattr(translator, 't') else "Dismiss")
+        self.install_banner_dismiss.setObjectName('bannerDismiss')
+        self.install_banner_dismiss.clicked.connect(self._dismiss_install_banner)
+        banner_layout.addWidget(self.install_banner_dismiss)
+
+        layout.addWidget(self.install_banner)
+        layout.addWidget(self.header_online)
+
+        # Add a soft drop shadow to make the banner appear raised
+        try:
+            shadow = QtWidgets.QGraphicsDropShadowEffect(self.install_banner)
+            shadow.setBlurRadius(18)
+            shadow.setOffset(0, 4)
+            shadow.setColor(QtGui.QColor(0, 0, 0, 160))
+            self.install_banner.setGraphicsEffect(shadow)
+        except Exception:
+            pass
 
         # Check downloaded versions
         downloaded_versions = self.check_downloaded_versions()
@@ -1995,40 +2605,107 @@ class MainWindow(QtWidgets.QWidget):
     def open_logs(self):
         """Open the logs folder and select the most recent log file if present."""
         try:
-            # Determine latest log file
             logs_dir = log_folder
-            log_files = sorted(logs_dir.glob('psa_diag_*.log'), key=lambda p: p.stat().st_mtime, reverse=True)
+            if not logs_dir.exists():
+                QtWidgets.QMessageBox.information(self, translator.t('app.title'), translator.t('messages.log.open_failed'))
+                return
+
+            log_files = sorted(list(logs_dir.glob('psa_diag_*.log')), key=lambda p: p.stat().st_mtime, reverse=True)
             if log_files:
-                latest = log_files[0]
-                # On Windows, open Explorer and select the file
-                if sys.platform == 'win32':
-                    try:
-                        subprocess.run(['explorer', f'/select,{str(latest)}'])
-                        return
-                    except Exception:
-                        pass
-                # Fallback: open folder or file using start/open
+                latest_log = log_files[0]
                 try:
                     if sys.platform == 'win32':
-                        os.startfile(str(latest))
+                        os.startfile(str(latest_log))
                     elif sys.platform == 'darwin':
-                        subprocess.run(['open', str(latest)])
+                        subprocess.run(['open', str(latest_log)])
+                    else:
+                        subprocess.run(['xdg-open', str(latest_log)])
+                except Exception:
+                    # Fallback: open folder
+                    if sys.platform == 'win32':
+                        os.startfile(str(logs_dir))
+                    elif sys.platform == 'darwin':
+                        subprocess.run(['open', str(logs_dir)])
                     else:
                         subprocess.run(['xdg-open', str(logs_dir)])
-                    return
+            else:
+                QtWidgets.QMessageBox.information(self, translator.t('app.title'), translator.t('messages.log.open_failed'))
+        except Exception as e:
+            logger.error(f"Failed to open logs: {e}", exc_info=True)
+            QtWidgets.QMessageBox.warning(self, translator.t('app.title'), translator.t('messages.log.open_failed'))
+
+    def _banner_download_clicked(self):
+        """Handler for banner Download button: select the latest available
+        version in the combo (if present) and invoke the same download flow.
+        """
+        try:
+            latest = self.get_latest_available_version()
+            if not latest:
+                return
+
+            # Try to find the version in the combo and select it
+            if hasattr(self, 'version_combo'):
+                found_index = -1
+                for i in range(self.version_combo.count()):
+                    data = self.version_combo.itemData(i)
+                    if data and data[0] == latest:
+                        found_index = i
+                        break
+                if found_index >= 0:
+                    self.version_combo.setCurrentIndex(found_index)
+                else:
+                    # If not present, add it as a temporary entry (use archive.org fallback URL)
+                    url = None
+                    for display_name, version, vurl in getattr(self, 'version_options', []):
+                        if version == latest:
+                            url = vurl
+                            break
+                    if not url:
+                        url = f"https://archive.org/download/psa-diag.fr/Diagbox_Install_{latest}.7z"
+                    self.version_combo.addItem(latest, userData=(latest, url))
+                    self.version_combo.setCurrentIndex(self.version_combo.count() - 1)
+
+            # Ensure last_version_diagbox is set to the latest
+            self.last_version_diagbox = latest
+
+            # Hide the banner now that user requested the download
+            if hasattr(self, 'install_banner'):
+                self.install_banner.setVisible(False)
+
+            # Restore headers so user still sees installed/latest info
+            if hasattr(self, 'header_installed'):
+                try:
+                    self.header_installed.setVisible(True)
+                except Exception:
+                    pass
+            if hasattr(self, 'header_online'):
+                try:
+                    self.header_online.setVisible(True)
                 except Exception:
                     pass
 
-            # No logs found - try to open the folder instead
-            if sys.platform == 'win32':
-                os.startfile(str(logs_dir))
-            elif sys.platform == 'darwin':
-                subprocess.run(['open', str(logs_dir)])
-            else:
-                subprocess.run(['xdg-open', str(logs_dir)])
+            # Trigger the normal download flow
+            self.download_diagbox()
         except Exception as e:
-            logger.error(f"Failed to open logs: {e}")
-            QtWidgets.QMessageBox.warning(self, translator.t('app.title'), translator.t('messages.log.open_failed'))
+            logger.error(f"Error handling banner download click: {e}", exc_info=True)
+
+    def _dismiss_install_banner(self):
+        """Hide the install banner and restore the installed/latest headers."""
+        try:
+            if hasattr(self, 'install_banner'):
+                self.install_banner.setVisible(False)
+            if hasattr(self, 'header_installed'):
+                try:
+                    self.header_installed.setVisible(True)
+                except Exception:
+                    pass
+            if hasattr(self, 'header_online'):
+                try:
+                    self.header_online.setVisible(True)
+                except Exception:
+                    pass
+        except Exception as e:
+            logger.debug(f"Error dismissing install banner: {e}")
     def mousePressEvent(self, event):
         if event.button() == QtCore.Qt.MouseButton.LeftButton:
             # Check if click is on a widget that should not trigger window drag
