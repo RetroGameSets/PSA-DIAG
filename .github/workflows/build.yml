@@ -52,8 +52,7 @@ jobs:
             2. Run as Administrator
 
             ### Changes
-            - Automatic build from tag ${{ github.ref }}
-            - Last commit: ${{ github.event.head_commit.message }}
+            - ${{ github.event.head_commit.message }}
           files: dist/PSA_DIAG.exe
         env:
           GITHUB_TOKEN: ${{ env.GITHUB_TOKEN }}
