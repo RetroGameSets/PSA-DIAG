@@ -23,7 +23,7 @@ else:
     BASE = Path(__file__).resolve().parent
 
 # Centralized configuration (moved to `config.py`)
-from config import CONFIG_DIR, APP_VERSION, URL_LAST_VERSION_PSADIAG, URL_LAST_VERSION_DIAGBOX
+from config import CONFIG_DIR, APP_VERSION, URL_LAST_VERSION_PSADIAG, URL_LAST_VERSION_DIAGBOX, URL_VERSION_OPTIONS
 
 # Translation system
 class Translator:
@@ -407,7 +407,7 @@ class InstallThread(QtCore.QThread):
                         if output:
                             stdout_lines.append(output)
                             # Log the output for debugging
-                            logger.debug(f"7z output ({exe}): {output.strip()}")
+                            #logger.debug(f"7z output ({exe}): {output.strip()}")
 
                             # 7z outputs progress like "1% 2909 - filename"
                             line = output.strip()
@@ -555,11 +555,9 @@ class MainWindow(QtWidgets.QWidget):
         logger.info("[STEP 1] -- Fetching last Diagbox version...")
         self.fetch_last_version_diagbox()
         
-        # Version options: (display_name, version, url)
-        self.version_options = [
-            (f"Diagbox {self.last_version_diagbox} (Latest)", self.last_version_diagbox, f"https://archive.org/download/psa-diag.fr/Diagbox_Install_{self.last_version_diagbox}.7z"),
-            ("Diagbox 9.85", "9.85", "https://archive.org/download/psa-diag.fr/Diagbox_Install_9.85.7z")
-        ]
+        # Version options: load from remote JSON (configured in `config.URL_VERSION_OPTIONS`)
+        # Falls back to the built-in defaults if remote fetch fails.
+        self.version_options = self.load_version_options()
 
         # Connect signals
         self.download_finished.connect(self.on_download_finished)
@@ -568,6 +566,48 @@ class MainWindow(QtWidgets.QWidget):
         
         # Check for app updates after UI is ready
         QtCore.QTimer.singleShot(1000, self.check_app_update)
+
+    def load_version_options(self):
+        """Load version options from remote JSON configured in `config.URL_VERSION_OPTIONS`.
+
+        Expected JSON format: an array of objects or arrays, e.g.:
+        [
+          {"display_name": "Diagbox 09.180 (2024)", "version": "09.180_PSA_DIAG", "url": "https://..."},
+          ["Diagbox 09.85", "09.85", "https://..."]
+        ]
+
+        Returns a list of tuples: (display_name, version, url)
+        """
+        defaults = [
+            ("ERROR", "00.00", "ERROR")
+        ]
+
+        try:
+            logger.info(f"Loading version options from: {URL_VERSION_OPTIONS}")
+            resp = requests.get(URL_VERSION_OPTIONS, timeout=6)
+            resp.raise_for_status()
+            data = resp.json()
+            options = []
+            if isinstance(data, list):
+                for item in data:
+                    if isinstance(item, dict):
+                        display = item.get('display_name') or item.get('display') or item.get('name')
+                        version = item.get('version')
+                        url = item.get('url')
+                        if display and version and url:
+                            options.append((display, version, url))
+                    elif isinstance(item, (list, tuple)) and len(item) >= 3:
+                        options.append((item[0], item[1], item[2]))
+
+            if options:
+                logger.info(f"Loaded {len(options)} version options from remote JSON")
+                return options
+            else:
+                logger.warning("Version options JSON did not contain valid entries, using defaults")
+                return defaults
+        except Exception as e:
+            logger.warning(f"Failed to load version options from remote JSON: {e}")
+            return defaults
 
     def update_progress(self, value, speed, eta):
         # Update footer progress bar
@@ -909,6 +949,7 @@ class MainWindow(QtWidgets.QWidget):
             "PSA Interface Checker.lnk",
             "Terminate Diagbox Process.lnk"
             "Terminate Diagbox Processes.lnk"
+            "PSA XS Evolution Interface Checker.lnk"
         ]
         
         for shortcut in shortcut_names:
@@ -1913,10 +1954,26 @@ class MainWindow(QtWidgets.QWidget):
         self.log_widget.setMinimumHeight(200)
         layout.addWidget(self.log_widget)
         
-        # Add logging handler for this widget
+        # Add logging handler for this widget (only INFO+ so debug lines stay in file)
         self.log_handler = QTextEditLogger(self.log_widget)
+        self.log_handler.setLevel(logging.INFO)
         self.log_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
         logger.addHandler(self.log_handler)
+        # Populate the UI console with the existing log file contents so the
+        # in-app view matches the file (startup logs are written before the
+        # QTextEdit handler is attached). Filter out DEBUG lines to avoid
+        # duplicating verbose debug entries in the UI.
+        try:
+            if log_file.exists():
+                raw = log_file.read_text(encoding='utf-8')
+                if raw:
+                    # Remove lines that are DEBUG-level entries
+                    filtered_lines = [l for l in raw.splitlines() if ' - DEBUG - ' not in l]
+                    filtered = "\n".join(filtered_lines)
+                    self.log_widget.setPlainText(filtered)
+        except Exception as e:
+            # Use debug here (file may be unreadable) but UI handler ignores DEBUG
+            logger.debug(f"Failed to populate UI console from log file: {e}")
         
         layout.addStretch()
         return w

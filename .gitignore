@@ -4,3 +4,5 @@ logs/*
 .vscode/*
 __pycache__/*
 build.ps1
+tools/create_diagbox_archive.ps1
+tools/version_options.example.json
