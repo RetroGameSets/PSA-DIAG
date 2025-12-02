@@ -79,6 +79,7 @@ QPushButton {
     font-weight: 500;
 }
 
+
 QPushButton#titleButton {
     background-color: transparent;
     border: 1px solid #3a3f48;
@@ -102,7 +103,7 @@ QPushButton:pressed {
     border: 1px solid #0e9aa7;
 }
 
-/* Disabled buttons: clearly grayed out, no hover/press visual effects, default cursor */
+/* Disabled buttons: clearly grayed out, no hover/press visual effects*/
 QPushButton:disabled {
     background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
                                 stop:0 #2b2f33, stop:1 #23262a);
@@ -111,7 +112,6 @@ QPushButton:disabled {
     padding: 10px 16px;
     border-radius: 8px;
     font-weight: 500;
-    cursor: default;
 }
 
 /* Ensure disabled buttons don't respond visually to hover/pressed states */
@@ -130,7 +130,6 @@ QPushButton[checkable="true"]:disabled {
     border: 2px solid #2a2e32;
     color: #757a7f;
     icon-size: 24px;
-    cursor: default;
 }
 
 /* Action buttons with more volume */
@@ -165,7 +164,6 @@ QPushButton#actionButton:disabled {
     padding: 12px 18px;
     border-radius: 10px;
     font-weight: 600;
-    cursor: default;
 }
 
 QPushButton#titleButton:disabled {
@@ -173,7 +171,6 @@ QPushButton#titleButton:disabled {
     border: 1px solid #2b2f33;
     color: #8a8f95;
     padding: 6px 10px;
-    cursor: default;
 }
 
 QMessageBox QPushButton:disabled {

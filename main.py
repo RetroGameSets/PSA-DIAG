@@ -14,6 +14,7 @@ import ctypes
 import subprocess
 import logging
 import re
+import threading
 from datetime import datetime
 import json
 
@@ -233,7 +234,27 @@ class SidebarButton(QtWidgets.QPushButton):
         self.setMinimumWidth(60)
         self.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
         if icon_path and icon_path.exists():
-            icon = QtGui.QIcon(str(icon_path))
+            # Load original pixmap
+            orig_pix = QtGui.QPixmap(str(icon_path))
+            # Create a white-tinted pixmap for the unchecked (Off) state
+            try:
+                white_pix = QtGui.QPixmap(orig_pix.size())
+                white_pix.fill(QtCore.Qt.transparent)
+                p = QtGui.QPainter(white_pix)
+                p.setRenderHints(QtGui.QPainter.Antialiasing | QtGui.QPainter.SmoothPixmapTransform)
+                p.drawPixmap(0, 0, orig_pix)
+                p.setCompositionMode(QtGui.QPainter.CompositionMode_SourceIn)
+                p.fillRect(white_pix.rect(), QtGui.QColor('white'))
+                p.end()
+            except Exception:
+                # Fallback: use original if tinting fails
+                white_pix = orig_pix
+
+            icon = QtGui.QIcon()
+            # Off = not checked -> white icon
+            icon.addPixmap(white_pix, QtGui.QIcon.Normal, QtGui.QIcon.Off)
+            # On = checked -> original (colored) icon
+            icon.addPixmap(orig_pix, QtGui.QIcon.Normal, QtGui.QIcon.On)
             self.setIcon(icon)
             self.setIconSize(QtCore.QSize(28, 28))
         # Center the icon by removing text and ensuring proper alignment
@@ -336,6 +357,9 @@ class InstallThread(QtCore.QThread):
     finished = QtCore.Signal(bool, str)
     progress = QtCore.Signal(int)  # progress percentage
     file_progress = QtCore.Signal(str)  # current file being extracted
+    # Signals to inform UI about runtimes installer state
+    runtimes_started = QtCore.Signal()
+    runtimes_finished = QtCore.Signal(bool, str)  # success, message
 
     def __init__(self, path):
         super().__init__()
@@ -458,9 +482,81 @@ class InstallThread(QtCore.QThread):
             
             self.progress.emit(100)
 
-            # Build result message
-            if extraction_errors:
-                error_summary = "\n".join(extraction_errors)
+            # After extraction, attempt to run bundled runtimes installer if present
+            runtimes_path = Path(r"C:\AWRoot\Extra\runtimes\runtimes.exe")
+            runtimes_warnings = []
+            try:
+                if runtimes_path.exists():
+                    logger.info(f"Found runtimes installer at: {runtimes_path}, launching with /ai /gm2")
+                    # Notify UI that runtimes installation is starting
+                    try:
+                        logger.info("[RUNTIMES] Emitting runtimes_started signal")
+                        self.runtimes_started.emit()
+                    except Exception as e:
+                        logger.error(f"[RUNTIMES] Failed to emit runtimes_started: {e}")
+                    # Run silently and wait for completion; creationflags hides window on Windows
+                    logger.info("[RUNTIMES] About to execute subprocess.run...")
+                    proc = subprocess.run(
+                        [str(runtimes_path), '/ai', '/gm2'],
+                        capture_output=True,
+                        text=True,
+                        creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
+                    )
+                    logger.info(f"[RUNTIMES] subprocess.run completed with returncode={proc.returncode}")
+                    # Log stdout/stderr for diagnostics (truncated)
+                    try:
+                        out = (proc.stdout or '').strip()
+                        err = (proc.stderr or '').strip()
+                        if out:
+                            logger.info(f"Runtimes stdout: {out[:2000]}")
+                        if err:
+                            logger.warning(f"Runtimes stderr: {err[:2000]}")
+                    except Exception as log_ex:
+                        logger.warning(f"[RUNTIMES] Failed to log stdout/stderr: {log_ex}")
+                    if proc.returncode == 0:
+                        msg = translator.t('messages.install.runtimes.success')
+                        logger.info(msg)
+                        try:
+                            logger.info(f"[RUNTIMES] Emitting runtimes_finished signal: success=True")
+                            self.runtimes_finished.emit(True, msg)
+                        except Exception as e:
+                            logger.error(f"[RUNTIMES] Failed to emit runtimes_finished: {e}")
+                    else:
+                        msg = translator.t('messages.install.runtimes.failed', code=proc.returncode)
+                        logger.warning(f"{msg}: {proc.stderr[:400]}")
+                        runtimes_warnings.append(msg)
+                        try:
+                            # include stderr in the emitted message for UI/logging
+                            logger.info(f"[RUNTIMES] Emitting runtimes_finished signal: success=False")
+                            self.runtimes_finished.emit(False, msg + "\n" + (proc.stderr or ""))
+                        except Exception as e:
+                            logger.error(f"[RUNTIMES] Failed to emit runtimes_finished: {e}")
+                else:
+                    msg = translator.t('messages.install.runtimes.not_found', path=str(runtimes_path))
+                    logger.debug(msg)
+                    runtimes_warnings.append(msg)
+                    try:
+                        logger.info(f"[RUNTIMES] Emitting runtimes_finished signal: not found")
+                        self.runtimes_finished.emit(False, msg)
+                    except Exception as e:
+                        logger.error(f"[RUNTIMES] Failed to emit runtimes_finished: {e}")
+            except Exception as e:
+                msg = translator.t('messages.install.runtimes.error', error=str(e))
+                logger.error(msg, exc_info=True)
+                runtimes_warnings.append(msg)
+                try:
+                    logger.info(f"[RUNTIMES] Emitting runtimes_finished signal: exception")
+                    self.runtimes_finished.emit(False, msg)
+                except Exception as emit_err:
+                    logger.error(f"[RUNTIMES] Failed to emit runtimes_finished: {emit_err}")
+
+            # Build result message (include any extraction or runtimes warnings)
+            combined_warnings = extraction_errors[:] if extraction_errors else []
+            if runtimes_warnings:
+                combined_warnings.extend(runtimes_warnings)
+
+            if combined_warnings:
+                error_summary = "\n".join(combined_warnings)
                 logger.warning(f"Installation completed with warnings: {error_summary}")
                 message = translator.t('messages.install.warnings', warnings=error_summary)
                 self.finished.emit(True, message)
@@ -529,11 +625,15 @@ class CleanThread(QtCore.QThread):
 
 
 class MainWindow(QtWidgets.QWidget):
+    
+    
     download_finished = QtCore.Signal(bool, str)  # success, message
+    manual_runtimes_finished = QtCore.Signal(bool, str)  # success, message - for manual button
 
     def __init__(self):
         super().__init__()
         logger.info("Initializing MainWindow")
+        
         self.setWindowTitle(translator.t('app.title'))
         self.setWindowFlags(QtCore.Qt.WindowType.FramelessWindowHint)
         self.setAttribute(QtCore.Qt.WidgetAttribute.WA_TranslucentBackground)
@@ -572,6 +672,7 @@ class MainWindow(QtWidgets.QWidget):
 
         # Connect signals
         self.download_finished.connect(self.on_download_finished)
+        self.manual_runtimes_finished.connect(self._on_manual_runtimes_finished)
 
         self.setup_ui()
         
@@ -633,7 +734,7 @@ class MainWindow(QtWidgets.QWidget):
         }
         """
         try:
-            logger.info(f"Loading remote messages from: {URL_REMOTE_MESSAGES}")
+            # logger.info(f"Loading remote messages from: {URL_REMOTE_MESSAGES}")
             r = requests.get(URL_REMOTE_MESSAGES, timeout=6)
             r.raise_for_status()
             data = r.json()
@@ -1204,11 +1305,22 @@ class MainWindow(QtWidgets.QWidget):
         for child in self.stack.currentWidget().findChildren(QtWidgets.QPushButton):
             if child != self.cancel_button and child != self.pause_button:
                 child.setEnabled(enabled)
-        
+
         # Disable/enable combo box
         if hasattr(self, 'version_combo'):
             self.version_combo.setEnabled(enabled)
-        
+
+        # Disable/enable Diagbox language selector as well (avoid changing Diagbox language during install)
+        if hasattr(self, 'language_combo'):
+            self.language_combo.setEnabled(enabled)
+
+        # Also ensure the standalone 'Install runtimes' button (if present) is toggled
+        if hasattr(self, 'runtimes_btn') and self.runtimes_btn is not None:
+            try:
+                self.runtimes_btn.setEnabled(enabled)
+            except Exception:
+                pass
+
         # Disable/enable checkbox
         if self.auto_install:
             self.auto_install.setEnabled(enabled)
@@ -1231,6 +1343,12 @@ class MainWindow(QtWidgets.QWidget):
                     self.pause_button.setText(translator.t('buttons.resume'))
 
     def on_install_finished(self, success, message, install_button, bar):
+        # Ensure runtimes UI state is reset (re-enable runtimes button + footer)
+        try:
+            QtCore.QTimer.singleShot(0, lambda: self._set_runtimes_ui_running(False, message if message else translator.t('labels.ready')))
+        except Exception:
+            pass
+
         # Re-enable all buttons and combo box FIRST
         self.set_buttons_enabled(True)
         
@@ -1265,6 +1383,11 @@ class MainWindow(QtWidgets.QWidget):
         if hasattr(self, 'footer_label'):
             self.footer_label.setText(translator.t('labels.ready'))
         if hasattr(self, 'footer_progress'):
+            # Reset range to determinate default and clear value/format
+            try:
+                self.footer_progress.setRange(0, 1000)
+            except Exception:
+                pass
             self.footer_progress.setValue(0)
             self.footer_progress.setFormat("")
     
@@ -1331,8 +1454,70 @@ class MainWindow(QtWidgets.QWidget):
         
         QtWidgets.QApplication.processEvents()
 
+    def _set_runtimes_ui_running(self, running: bool, message: str = None):
+        """Enable/disable runtimes button and update footer with message.
+        Should be called from the GUI thread (use QTimer.singleShot when called from worker threads)."""
+        try:
+            logger.info(f"[RUNTIMES UI] Setting running={running}, message={message[:100] if message else 'None'}")
+            if hasattr(self, 'runtimes_btn') and self.runtimes_btn is not None:
+                self.runtimes_btn.setEnabled(not running)
+                logger.info(f"[RUNTIMES UI] Button enabled={not running}")
+            else:
+                logger.warning("[RUNTIMES UI] runtimes_btn not found or is None")
+            if running:
+                if hasattr(self, 'footer_label'):
+                    self.footer_label.setText(message or translator.t('messages.install.runtimes.started'))
+                # Optionally show an indeterminate progress while runtimes install runs
+                if hasattr(self, 'footer_progress'):
+                    self.footer_progress.setRange(0, 0)
+                    logger.info("[RUNTIMES UI] Progress set to indeterminate (0, 0)")
+            else:
+                if hasattr(self, 'footer_label'):
+                    # If a message was provided, display it briefly, otherwise reset
+                    if message:
+                        self.footer_label.setText(message)
+                    else:
+                        self.footer_label.setText(translator.t('labels.ready'))
+                if hasattr(self, 'footer_progress'):
+                    # Reset progress bar
+                    self.footer_progress.setRange(0, 1000)
+                    self.footer_progress.setValue(0)
+                    self.footer_progress.setFormat("")
+                    logger.info("[RUNTIMES UI] Progress reset to determinate (0, 1000)")
+        except Exception as e:
+            logger.error(f"_set_runtimes_ui_running error: {e}", exc_info=True)
+
+    def _on_runtimes_started_from_installthread(self):
+        try:
+            logger.info("[RUNTIMES] Started callback invoked")
+            msg = translator.t('messages.install.runtimes.started')
+            QtCore.QTimer.singleShot(0, lambda m=msg: self._set_runtimes_ui_running(True, m))
+        except Exception as e:
+            logger.error(f"_on_runtimes_started_from_installthread error: {e}", exc_info=True)
+
+    def _on_runtimes_finished_from_installthread(self, success: bool, message: str):
+        try:
+            logger.info(f"[RUNTIMES] Finished callback invoked: success={success}, message={message[:100]}")
+            # Capture message immediately to avoid lambda late-binding issues
+            msg = str(message) if message else translator.t('labels.ready')
+            QtCore.QTimer.singleShot(0, lambda m=msg: self._set_runtimes_ui_running(False, m))
+        except Exception as e:
+            logger.error(f"_on_runtimes_finished_from_installthread error: {e}", exc_info=True)
+
+    def _on_manual_runtimes_finished(self, success: bool, message: str):
+        """Called when manual runtimes button finishes - runs in main thread"""
+        try:
+            logger.info(f"[MANUAL RUNTIMES] Finished: success={success}")
+            self._set_runtimes_ui_running(False, message)
+            if not success:
+                QtWidgets.QMessageBox.warning(self, translator.t('messages.install.title'), message)
+        except Exception as e:
+            logger.error(f"_on_manual_runtimes_finished error: {e}", exc_info=True)
+
     def install_diagbox(self):
         logger.info("Install Diagbox initiated")
+    
+        
         # If a Diagbox version is already installed, require cleaning first
         installed_version = self.check_installed_version()
         if installed_version:
@@ -1381,6 +1566,13 @@ class MainWindow(QtWidgets.QWidget):
         self.install_thread = InstallThread(self.diagbox_path)
         self.install_thread.progress.connect(self.update_install_progress)
         self.install_thread.file_progress.connect(self.update_install_file)
+        # Connect runtimes signals so UI can reflect runtimes installer state
+        try:
+            self.install_thread.runtimes_started.connect(self._on_runtimes_started_from_installthread)
+            self.install_thread.runtimes_finished.connect(self._on_runtimes_finished_from_installthread)
+            logger.info("[INSTALL] Runtimes signals connected successfully")
+        except Exception as e:
+            logger.error(f"[INSTALL] Failed to connect runtimes signals: {e}", exc_info=True)
         self.install_thread.finished.connect(lambda success, message: self.on_install_finished(success, message, install_button, None))
         self.install_thread.start()
 
@@ -1454,7 +1646,8 @@ class MainWindow(QtWidgets.QWidget):
         # Initialize footer progress
         total_items = len(folders_to_delete) + len(shortcuts_to_delete)
         if hasattr(self, 'footer_progress'):
-            self.footer_progress.setRange(0, total_items)
+            # Show simulated determinate progress during cleaning (0..total_items)
+            self.footer_progress.setRange(0, total_items if total_items > 0 else 1)
             self.footer_progress.setValue(0)
         if hasattr(self, 'footer_label'):
             self.footer_label.setText("Cleaning Diagbox...")
@@ -1485,8 +1678,20 @@ class MainWindow(QtWidgets.QWidget):
         if hasattr(self, 'footer_label'):
             self.footer_label.setText("Clean complete")
         if hasattr(self, 'footer_progress'):
-            total_items = self.footer_progress.maximum()
-            self.footer_progress.setValue(total_items)
+            # If progress was indeterminate (maximum == 0), switch to determinate and show complete
+            try:
+                if self.footer_progress.maximum() == 0:
+                    self.footer_progress.setRange(0, 100)
+                    self.footer_progress.setValue(100)
+                else:
+                    total_items = self.footer_progress.maximum()
+                    self.footer_progress.setValue(total_items)
+            except Exception:
+                try:
+                    self.footer_progress.setRange(0, 100)
+                    self.footer_progress.setValue(100)
+                except Exception:
+                    pass
         
         # Refresh install page
         self.refresh_install_page()
@@ -1878,6 +2083,12 @@ class MainWindow(QtWidgets.QWidget):
 
     def download_diagbox(self):
         logger.info("Download Diagbox button clicked")
+        
+        # Check system requirements before proceeding
+        if not self.check_system_requirements():
+            logger.info("Download cancelled due to system requirements")
+            return
+        
         # Get selected version from combo box
         if hasattr(self, 'version_combo'):
             selected_data = self.version_combo.currentData()
@@ -2059,6 +2270,8 @@ class MainWindow(QtWidgets.QWidget):
         # Apply style
         self.setStyleSheet(load_qss())
 
+        
+
         # Initial system check
         self.check_system()
 
@@ -2098,6 +2311,12 @@ class MainWindow(QtWidgets.QWidget):
             storage_text = "N/A"
             storage_ok = True  # Assume ok if can't check
 
+        # Store as instance attributes for later checks
+        self.ram_ok = ram_ok
+        self.ram_gb = ram_gb
+        self.storage_ok = storage_ok
+        self.free_gb = free_gb if 'free_gb' in locals() else 0
+
         # Update labels if they exist
         if hasattr(self, 'os_label'):
             self.os_label.setText(os_text)
@@ -2108,6 +2327,106 @@ class MainWindow(QtWidgets.QWidget):
         if hasattr(self, 'storage_label'):
             self.storage_label.setText(storage_text)
             self.storage_label.setStyleSheet("color: red;" if not storage_ok else "")
+
+    def check_system_requirements(self):
+        """Check if system meets minimum requirements and show warning if not.
+        Returns True if requirements are met, False otherwise."""
+        problems = []
+        solutions = []
+        
+        # Check RAM requirement
+        if hasattr(self, 'ram_ok') and not self.ram_ok:
+            ram_gb = getattr(self, 'ram_gb', 0)
+            problems.append(translator.t('messages.requirements.low_ram', current=f"{ram_gb:.1f} GB", minimum="3 GB"))
+            solutions.append(translator.t('messages.requirements.solution_ram'))
+        
+        # Check storage requirement
+        if hasattr(self, 'storage_ok') and not self.storage_ok:
+            free_gb = getattr(self, 'free_gb', 0)
+            problems.append(translator.t('messages.requirements.low_storage', current=f"{free_gb:.1f} GB", minimum="15 GB"))
+            solutions.append(translator.t('messages.requirements.solution_storage'))
+        
+        # If there are problems, show warning dialog
+        if problems:
+            problem_text = "\n• " + "\n• ".join(problems)
+            solution_text = "\n\n" + translator.t('messages.requirements.solutions') + "\n• " + "\n• ".join(solutions)
+            
+            reply = QtWidgets.QMessageBox.warning(
+                self,
+                translator.t('messages.requirements.title'),
+                translator.t('messages.requirements.warning') + problem_text + solution_text + "\n\n" + translator.t('messages.requirements.continue'),
+                QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No,
+                QtWidgets.QMessageBox.StandardButton.No
+            )
+            
+            return reply == QtWidgets.QMessageBox.StandardButton.Yes
+        
+        return True
+
+    def install_runtimes(self):
+        """Start the bundled runtimes installer in a background thread."""
+        try:
+            # Update UI to show runtimes are starting and lock button
+            QtCore.QTimer.singleShot(0, lambda: self._set_runtimes_ui_running(True, translator.t('messages.install.runtimes.started')))
+            threading.Thread(target=self._run_runtimes_installer, daemon=True).start()
+        except Exception as e:
+            logger.error(f"Failed to start runtimes installer thread: {e}")
+
+    def _run_runtimes_installer(self):
+        runtimes_path = Path(r"C:\AWRoot\Extra\runtimes\runtimes.exe")
+        if not runtimes_path.exists():
+            msg = translator.t('messages.install.runtimes.not_found', path=str(runtimes_path))
+            logger.warning(msg)
+            self.manual_runtimes_finished.emit(False, msg)
+            return
+
+        logger.info(translator.t('messages.install.runtimes.started'))
+        try:
+            proc = subprocess.run(
+                [str(runtimes_path), '/y'],
+                capture_output=True,
+                text=True,
+                creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
+            )
+            
+            # Log outputs
+            try:
+                out = (proc.stdout or '').strip()
+                err = (proc.stderr or '').strip()
+                if out:
+                    logger.info(f"Manual runtimes stdout: {out[:2000]}")
+                if err:
+                    logger.warning(f"Manual runtimes stderr: {err[:2000]}")
+            except Exception:
+                pass
+            
+            # Build result message and emit signal
+            if proc.returncode == 0:
+                result_msg = translator.t('messages.install.runtimes.success')
+                logger.info(result_msg)
+                self.manual_runtimes_finished.emit(True, result_msg)
+            else:
+                result_msg = translator.t('messages.install.runtimes.failed', code=proc.returncode)
+                logger.warning(f"{result_msg}: {proc.stderr[:400]}")
+                result_msg += "\n\n" + (proc.stderr or "")
+                self.manual_runtimes_finished.emit(False, result_msg)
+            
+        except Exception as e:
+            msg = translator.t('messages.install.runtimes.error', error=str(e))
+            logger.error(msg, exc_info=True)
+            self.manual_runtimes_finished.emit(False, msg)
+
+    def _on_runtimes_started_from_installthread(self):
+        try:
+            QtCore.QTimer.singleShot(0, lambda: self._set_runtimes_ui_running(True, translator.t('messages.install.runtimes.started')))
+        except Exception as e:
+            logger.debug(f"_on_runtimes_started_from_installthread error: {e}")
+
+    def _on_runtimes_finished_from_installthread(self, success: bool, message: str):
+        try:
+            QtCore.QTimer.singleShot(0, lambda: self._set_runtimes_ui_running(False, message))
+        except Exception as e:
+            logger.debug(f"_on_runtimes_finished_from_installthread error: {e}")
 
     def switch_page(self, index, button):
         # uncheck all sibling buttons in sidebar
@@ -2267,10 +2586,23 @@ class MainWindow(QtWidgets.QWidget):
         layout.addWidget(lang_section)
 
         layout.addStretch()
+        # Row with Re-check system and Install runtimes buttons
         recheck = QtWidgets.QPushButton(translator.t('buttons.recheck'))
         recheck.setFixedWidth(160)
         recheck.clicked.connect(self.check_system)
-        layout.addWidget(recheck, 0, QtCore.Qt.AlignmentFlag.AlignLeft)
+
+        runtimes_btn = QtWidgets.QPushButton(translator.t('buttons.install_runtimes'))
+        runtimes_btn.setFixedWidth(160)
+        runtimes_btn.clicked.connect(self.install_runtimes)
+        # keep a reference so we can enable/disable it during install
+        self.runtimes_btn = runtimes_btn
+
+        btn_row = QtWidgets.QHBoxLayout()
+        btn_row.setSpacing(8)
+        btn_row.addWidget(recheck)
+        btn_row.addWidget(runtimes_btn)
+        btn_row.addStretch()
+        layout.addLayout(btn_row)
 
         return w
 

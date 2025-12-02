@@ -17,14 +17,15 @@
     "kill_process": "Kill/Close Process",
     "pause": "Pause",
     "resume": "Resume",
-      "cancel": "Cancel Download",
-      "recheck": "Re-check system",
-      "show_console": "Show Console",
-      "hide_console": "Hide Console",
-      "minimize": "-",
-      "close": "X",
-      "open_log": "Open Logs",
-      "dismiss": "Dismiss"
+    "cancel": "Cancel Download",
+    "recheck": "Re-check system",
+    "show_console": "Show Console",
+    "hide_console": "Hide Console",
+    "minimize": "-",
+    "close": "X",
+    "open_log": "Open Logs",
+    "dismiss": "Dismiss",
+    "install_runtimes": "Install runtimes"
   },
   "labels": {
     "installed_version": "Installed Version : {version}",
@@ -76,6 +77,14 @@
       "failed": "Installation failed: {error}",
       "complete": "Installation complete",
       "failed_status": "Installation failed"
+    ,
+      "runtimes": {
+        "not_found": "Runtimes installer not found at: {path}",
+        "started": "Running bundled runtimes installer...",
+        "success": "Runtimes installed successfully.",
+        "failed": "Runtimes installer returned code: {code}",
+        "error": "Runtimes installer error: {error}"
+      }
     },
     "clean": {
       "title": "Clean Diagbox",
@@ -124,6 +133,16 @@
       "failed": "Self-update failed: {error}",
       "error": "Error",
       "fetch_failed": "Failed to fetch last version: {error}"
+    },
+    "requirements": {
+      "title": "Insufficient System Configuration",
+      "warning": "Your system does not meet the minimum requirements:",
+      "low_ram": "Insufficient RAM: {current} detected (minimum required: {minimum})",
+      "low_storage": "Insufficient disk space: {current} available on C: (minimum required: {minimum})",
+      "solutions": "Recommended solutions:",
+      "solution_ram": "Add more RAM to your computer",
+      "solution_storage": "Clean up C: drive by deleting unnecessary files, emptying recycle bin, or uninstalling programs",
+      "continue": "Do you want to continue anyway?"
     },
     "page_update": "Update / Refresh (Not available)"
   },

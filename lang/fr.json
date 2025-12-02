@@ -24,7 +24,8 @@
     "minimize": "-",
     "close": "X",
     "open_log": "Ouvrir les logs",
-    "dismiss": "Fermer"
+    "dismiss": "Fermer",
+    "install_runtimes": "Installer les runtimes"
   },
   "labels": {
     "installed_version": "Version Installée : {version}",
@@ -76,6 +77,14 @@
       "failed": "Échec de l'installation : {error}",
       "complete": "Installation terminée",
       "failed_status": "Installation échouée"
+    ,
+      "runtimes": {
+        "not_found": "Installateur des runtimes introuvable : {path}",
+        "started": "Lancement de l'installateur des runtimes intégré...",
+        "success": "Runtimes installés avec succès.",
+        "failed": "L'installateur des runtimes a retourné le code : {code}",
+        "error": "Erreur de l'installateur des runtimes : {error}"
+      }
     },
     "clean": {
       "title": "Nettoyer Diagbox",
@@ -124,6 +133,16 @@
       "failed": "Échec de la mise à jour automatique : {error}",
       "error": "Erreur",
       "fetch_failed": "Échec de récupération de la dernière version : {error}"
+    },
+    "requirements": {
+      "title": "Configuration Système Insuffisante",
+      "warning": "Votre système ne respecte pas les exigences minimales :",
+      "low_ram": "RAM insuffisante : {current} détectée (minimum requis : {minimum})",
+      "low_storage": "Espace disque insuffisant : {current} disponible sur C: (minimum requis : {minimum})",
+      "solutions": "Solutions recommandées :",
+      "solution_ram": "Ajouter de la RAM à votre ordinateur",
+      "solution_storage": "Nettoyer le disque C: en supprimant les fichiers inutiles, vider la corbeille, ou désinstaller des programmes",
+      "continue": "Voulez-vous continuer malgré tout ?"
     },
     "page_update": "Mise à jour / Actualiser (Non disponible)"
   },
