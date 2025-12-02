@@ -238,9 +238,9 @@ class UpdaterGUI:
         args = self.args
         # Update UI status
         if tk:
-            self.message_var.set('Waiting for target to exit...' if args.wait_pid else 'Preparing to replace')
+            self.message_var.set('Update in progress... Please wait...' if args.wait_pid else 'Preparing to replace')
         else:
-            self.status('Waiting for target to exit...' if args.wait_pid else 'Preparing to replace')
+            self.status('Update in progress... Please wait...' if args.wait_pid else 'Preparing to replace')
 
         if args.wait_pid:
             if tk:
