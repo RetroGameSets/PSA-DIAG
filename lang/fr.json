@@ -85,6 +85,15 @@
         "failed": "L'installateur des runtimes a retourné le code : {code}",
         "error": "Erreur de l'installateur des runtimes : {error}"
       }
+        ,
+        "summary": {
+          "diagbox": "Installation Diagbox",
+          "runtimes": "Installation Runtimes",
+          "driver": "Installation Driver",
+          "ok": "OK",
+          "error": "Erreur : {msg}",
+          "not_run": "Non exécuté"
+        }
     },
     "clean": {
       "title": "Nettoyer Diagbox",
@@ -99,7 +108,9 @@
       "title": "Installer VCI Driver",
       "not_found": "Installateur VCI Driver introuvable.\n\nEmplacement attendu:\n{path}\n\nVeuillez d'abord installer Diagbox.",
       "success": "VCI Driver installé avec succès.",
+      "success_reboot": "VCI Driver installé avec succès. Un redémarrage est peut-etre nécessaire pour terminer l'installation.",
       "warning": "L'installation du VCI Driver a retourné le code : {code}\n\nLe pilote est peut-être déjà installé ou nécessite un redémarrage.",
+      "already_present": "VCI Driver déjà installé (fichiers présents).",
       "error": "Échec de l'installation du VCI Driver :\n\n{error}"
     },
     "launch": {

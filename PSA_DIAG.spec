@@ -18,7 +18,7 @@ _pyside6_binaries = []
 _pyside6_datas = []
 # PySide6 collection intentionally disabled for test builds
 
-# Prepare datas list and include updater onedir distribution whether Tree is available or not
+# Prepare datas list and include updater standalone executable
 datas_list = [
     ('updater.py', '.'),
     ('style.qss', '.'),
@@ -31,19 +31,15 @@ datas_list = [
     ('config.py', '.'),
 ]
 
-# If PyInstaller provides Tree, use it to include the whole folder. Otherwise fall back to manual listing.
-updater_dir = os.path.join('tools', 'updater')
-if Tree is not None and os.path.isdir(updater_dir):
-    datas_list.append(Tree(updater_dir, prefix='tools/updater'))
-elif os.path.isdir(updater_dir):
-    # Walk the updater directory and add each file
-    for root, _, files in os.walk(updater_dir):
-        rel_root = os.path.relpath(root, updater_dir)
-        for fn in files:
-            src = os.path.join(root, fn)
-            # destination inside the bundle should preserve the updater folder structure
-            dest_dir = os.path.join('tools', 'updater', rel_root) if rel_root != '.' else os.path.join('tools', 'updater')
-            datas_list.append((src, dest_dir))
+# Include standalone updater.exe from tools/ folder
+updater_exe = os.path.join('tools', 'updater.exe')
+if os.path.isfile(updater_exe):
+    datas_list.append((updater_exe, 'tools'))
+else:
+    # Fallback: check dist/updater.exe
+    updater_exe_dist = os.path.join('dist', 'updater.exe')
+    if os.path.isfile(updater_exe_dist):
+        datas_list.append((updater_exe_dist, 'tools'))
 
 datas = datas_list + _pyside6_datas
 

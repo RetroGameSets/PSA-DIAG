@@ -11,6 +11,7 @@ import os
 import time
 import shutil
 import ctypes
+import glob
 import subprocess
 import logging
 import re
@@ -360,6 +361,8 @@ class InstallThread(QtCore.QThread):
     # Signals to inform UI about runtimes installer state
     runtimes_started = QtCore.Signal()
     runtimes_finished = QtCore.Signal(bool, str)  # success, message
+    # Signal to report driver installation result when run inside the install thread
+    driver_finished = QtCore.Signal(bool, str)  # success, message
 
     def __init__(self, path):
         super().__init__()
@@ -482,7 +485,63 @@ class InstallThread(QtCore.QThread):
             
             self.progress.emit(100)
 
-            # After extraction, attempt to run bundled runtimes installer if present
+            # After extraction, attempt to run VCI driver installer BEFORE runtimes if present
+            try:
+                # Use DPInst for driver installation as requested
+                dpinst_path = r"C:\AWRoot\extra\drivers\xsevo\amd64\DPInst.exe"
+                dp_path_arg = r"C:\AWRoot\extra\drivers\xsevo\dp"
+                ini_check = r"C:\Windows\System32\DriverStore\FileRepository\vcommusb.inf_amd64_0cb1ee01f7e64ab9.ini"
+                if os.path.exists(dpinst_path):
+                    logger.info(f"Found DPInst at: {dpinst_path}")
+                    # If .ini already exists, consider driver already installed
+                    if os.path.exists(ini_check):
+                        msg = translator.t('messages.vci_driver.already_present')
+                        logger.info("VCI .ini present before installation - already installed")
+                        self.driver_finished.emit(True, msg)
+                    else:
+                        logger.info(f"Launching DPInst with /PATH {dp_path_arg} (interactive mode)")
+                        try:
+                            dp_cwd = os.path.dirname(dpinst_path)
+                            drv_proc = subprocess.run(
+                                [dpinst_path, '/PATH', dp_path_arg],
+                                capture_output=True,
+                                text=True,
+                                cwd=dp_cwd
+                            )
+                            out = (drv_proc.stdout or '').strip()
+                            err = (drv_proc.stderr or '').strip()
+                            rc = drv_proc.returncode
+                            logger.debug(f"DPInst returned code={rc}")
+                            if out:
+                                logger.debug(f"DPInst stdout: {out[:2000]}")
+                            if err:
+                                logger.warning(f"DPInst stderr: {err[:2000]}")
+                            # If DPInst indicates success but requires reboot (e.g., return code 256), treat as success-with-reboot
+                            if rc == 0:
+                                if os.path.exists(ini_check):
+                                    msg = translator.t('messages.vci_driver.success')
+                                    self.driver_finished.emit(True, msg)
+                                else:
+                                    msg = translator.t('messages.vci_driver.warning', code=rc)
+                                    self.driver_finished.emit(False, msg + "\n" + (err or ''))
+                            elif rc == 256:
+                                msg = translator.t('messages.vci_driver.success_reboot')
+                                logger.info("DPInst returned reboot-required code; reporting success requiring reboot")
+                                self.driver_finished.emit(True, msg)
+                            else:
+                                msg = translator.t('messages.vci_driver.warning', code=rc)
+                                self.driver_finished.emit(False, msg + "\n" + (err or ''))
+                        except Exception as e:
+                            logger.error(f"DPInst exception inside InstallThread: {e}", exc_info=True)
+                            self.driver_finished.emit(False, translator.t('messages.vci_driver.error', error=str(e)))
+                else:
+                    # DPInst not found - emit not found message
+                    msg = translator.t('messages.vci_driver.not_found', path=dpinst_path)
+                    self.driver_finished.emit(False, msg)
+            except Exception as e:
+                logger.debug(f"Driver install pre-runtimes check failed: {e}")
+
+            # After driver install attempt, attempt to run bundled runtimes installer if present
             runtimes_path = Path(r"C:\AWRoot\Extra\runtimes\runtimes.exe")
             runtimes_warnings = []
             try:
@@ -570,24 +629,46 @@ class InstallThread(QtCore.QThread):
 
 
 class CleanThread(QtCore.QThread):
-    """Thread for cleaning Diagbox folders and shortcuts"""
+    """Thread for cleaning Diagbox folders, shortcuts and driver items
+
+    Accepts three lists: folders, shortcuts, and driver_items. The latter
+    contains paths (folders or files) related to the VCI driver that should
+    be deleted and reported separately in the confirmation dialog.
+    """
     finished = QtCore.Signal(bool, str, int)  # success, message, success_count
     progress = QtCore.Signal(int, int)  # current, total
     item_progress = QtCore.Signal(str)  # current item being deleted
 
-    def __init__(self, folders, shortcuts):
+    def __init__(self, folders, shortcuts, driver_items=None):
         super().__init__()
-        self.folders = folders
-        self.shortcuts = shortcuts
+        self.folders = folders or []
+        self.shortcuts = shortcuts or []
+        self.driver_items = driver_items or []
         self.failed_items = []
 
     def run(self):
-        total_items = len(self.folders) + len(self.shortcuts)
+        total_items = len(self.folders) + len(self.shortcuts) + len(self.driver_items)
         current_item = 0
         success_count = 0
-        
-        # Delete folders
+
+        # Protect folders that may contain DPInst (we must not delete them before running DPInst)
+        dpinst_path = r"C:\AWRoot\Extra\Drivers\xsevo\amd64\DPInst.exe"
+        norm_dpinst = os.path.normcase(os.path.normpath(dpinst_path))
+        deferred_folders = []
+        active_folders = []
         for folder in self.folders:
+            try:
+                nf = os.path.normcase(os.path.normpath(folder))
+                # If DPInst path starts with the folder path, defer deletion of that folder
+                if norm_dpinst.startswith(nf):
+                    deferred_folders.append(folder)
+                else:
+                    active_folders.append(folder)
+            except Exception:
+                active_folders.append(folder)
+
+        # Delete folders that are safe to remove now (not containing DPInst)
+        for folder in active_folders:
             try:
                 self.item_progress.emit(translator.t('labels.deleting_folder', folder=os.path.basename(folder)))
                 shutil.rmtree(folder)
@@ -596,10 +677,10 @@ class CleanThread(QtCore.QThread):
             except Exception as e:
                 logger.error(f"Failed to delete folder {folder}: {e}")
                 self.failed_items.append(f"{folder}: {str(e)}")
-            
+
             current_item += 1
             self.progress.emit(current_item, total_items)
-        
+
         # Delete shortcuts
         for shortcut in self.shortcuts:
             try:
@@ -610,10 +691,114 @@ class CleanThread(QtCore.QThread):
             except Exception as e:
                 logger.error(f"Failed to delete shortcut {shortcut}: {e}")
                 self.failed_items.append(f"{os.path.basename(shortcut)}: {str(e)}")
-            
+
             current_item += 1
             self.progress.emit(current_item, total_items)
-        
+        # Delete driver-related items (files or folders)
+        # The driver must only be removed via DPInst. Do NOT delete any driver files/folders manually.
+        dpinst_attempted = False
+        dpinst_success = False
+        try:
+            dpinst_path = r"C:\AWRoot\Extra\Drivers\xsevo\amd64\DPInst.exe"
+            # Use the single canonical INF path only. Do not attempt to infer from driver_items.
+            inf_path = r"C:\Windows\System32\DriverStore\FileRepository\vcommusb.inf_amd64_0cb1ee01f7e64ab9\vcommusb.inf"
+            if not os.path.exists(inf_path):
+                # If the canonical INF is not present, do not attempt other heuristics.
+                inf_path = None
+
+            if inf_path and os.path.exists(dpinst_path):
+                dpinst_attempted = True
+                try:
+                    self.item_progress.emit(translator.t('labels.deleting_shortcut', shortcut=os.path.basename(inf_path)))
+                    logger.info(f"Attempting DPInst uninstall. DPInst path={dpinst_path}, INF={inf_path}")
+                    # If the app is not running as admin, DPInst may fail silently or return non-zero
+                    try:
+                        elevated = is_admin()
+                    except Exception:
+                        elevated = False
+                    if not elevated:
+                        logger.warning("Current process is not elevated. DPInst may require admin rights to uninstall the driver.")
+
+                    # Run DPInst from its own directory (some installers expect local working directory)
+                    dpinst_cwd = os.path.dirname(dpinst_path)
+                    dp_proc = subprocess.run(
+                        [dpinst_path, '/U', inf_path, '/S'],
+                        capture_output=True,
+                        text=True,
+                        cwd=dpinst_cwd,
+                        creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
+                    )
+
+                    rc = dp_proc.returncode
+                    out = (dp_proc.stdout or '').strip()
+                    err = (dp_proc.stderr or '').strip()
+                    logger.debug(f"DPInst returncode={rc}")
+                    if out:
+                        logger.debug(f"DPInst stdout: {out[:4000]}")
+                    if err:
+                        logger.warning(f"DPInst stderr: {err[:4000]}")
+
+                    if rc == 0:
+                        dpinst_success = True
+                        logger.info("DPInst reported success; driver uninstall requested")
+                    else:
+                        logger.warning(f"DPInst returned non-zero code {rc}")
+                        self.failed_items.append(f"DPInst: returncode={rc} stdout={out[:1000]} stderr={err[:1000]}")
+                except Exception as e:
+                    logger.error(f"Failed to run DPInst: {e}", exc_info=True)
+                    self.failed_items.append(f"DPInst exception: {str(e)}")
+        except Exception:
+            pass
+
+        if self.driver_items:
+            if dpinst_attempted and dpinst_success:
+                for item in self.driver_items:
+                    try:
+                        name = os.path.basename(item)
+                        # Report progress but do not delete files manually
+                        self.item_progress.emit(translator.t('labels.deleting_folder', folder=name) if os.path.isdir(item) else translator.t('labels.deleting_shortcut', shortcut=name))
+                        logger.info(f"Driver removal handled by DPInst: {item}")
+                        success_count += 1
+                    except Exception as e:
+                        logger.error(f"Error while marking driver item processed {item}: {e}")
+                        self.failed_items.append(f"{item}: {str(e)}")
+                    current_item += 1
+                    self.progress.emit(current_item, total_items)
+            else:
+                # DPInst was not run or failed — flag all driver items as failed and do not delete them
+                for item in self.driver_items:
+                    name = os.path.basename(item)
+                    logger.warning(f"DPInst not successful; skipping manual deletion for: {item}")
+                    self.failed_items.append(f"DPInst not run or failed: {name}")
+                    current_item += 1
+                    self.progress.emit(current_item, total_items)
+
+        # If DPInst succeeded, now delete any deferred folders (those containing DPInst), because
+        # DPInst executable may be inside them and needed to uninstall the driver.
+        if deferred_folders:
+            if dpinst_success:
+                for folder in deferred_folders:
+                    try:
+                        self.item_progress.emit(translator.t('labels.deleting_folder', folder=os.path.basename(folder)))
+                        shutil.rmtree(folder)
+                        logger.info(f"Deleted deferred folder: {folder}")
+                        success_count += 1
+                    except Exception as e:
+                        logger.error(f"Failed to delete deferred folder {folder}: {e}")
+                        self.failed_items.append(f"{folder}: {str(e)}")
+
+                    current_item += 1
+                    self.progress.emit(current_item, total_items)
+            else:
+                for folder in deferred_folders:
+                    logger.warning(f"DPInst not successful; skipping deletion of deferred folder: {folder}")
+                    self.failed_items.append(f"DPInst not run or failed: {os.path.basename(folder)}")
+                    current_item += 1
+                    self.progress.emit(current_item, total_items)
+
+            current_item += 1
+            self.progress.emit(current_item, total_items)
+
         # Build result message
         if self.failed_items:
             error_list = "\n".join(self.failed_items)
@@ -1348,9 +1533,6 @@ class MainWindow(QtWidgets.QWidget):
             QtCore.QTimer.singleShot(0, lambda: self._set_runtimes_ui_running(False, message if message else translator.t('labels.ready')))
         except Exception:
             pass
-
-        # Re-enable all buttons and combo box FIRST
-        self.set_buttons_enabled(True)
         
         # Update footer
         if hasattr(self, 'footer_progress'):
@@ -1372,8 +1554,70 @@ class MainWindow(QtWidgets.QWidget):
                 except Exception:
                     pass
         
-        # Show message box AFTER re-enabling buttons
-        QtWidgets.QMessageBox.information(self, translator.t('messages.install.title'), message)
+        # Build and show installation summary (Diagbox, Runtimes, Driver)
+        try:
+            # Diagbox result
+            diag_success = bool(success)
+            diag_msg = message or ""
+
+            # Runtimes result (may be missing)
+            runtimes_success = None
+            runtimes_msg = None
+            if hasattr(self, '_runtimes_install_result') and self._runtimes_install_result is not None:
+                runtimes_success, runtimes_msg = self._runtimes_install_result
+
+            # Driver result (may be missing)
+            driver_success = None
+            driver_msg = None
+            if hasattr(self, '_driver_install_result') and self._driver_install_result is not None:
+                driver_success, driver_msg = self._driver_install_result
+
+            lines = []
+            # Diagbox line
+            diag_label = translator.t('messages.install.summary.diagbox')
+            if diag_success:
+                diag_status = translator.t('messages.install.summary.ok')
+            else:
+                diag_status = translator.t('messages.install.summary.error', msg=diag_msg)
+            lines.append(f"-- {diag_label} : {diag_status}")
+
+            # Runtimes line
+            runt_label = translator.t('messages.install.summary.runtimes')
+            if runtimes_success is None:
+                runt_status = translator.t('messages.install.summary.not_run')
+            else:
+                if runtimes_success:
+                    runt_status = translator.t('messages.install.summary.ok')
+                else:
+                    runt_status = translator.t('messages.install.summary.error', msg=(runtimes_msg or ''))
+            lines.append(f"-- {runt_label} : {runt_status}")
+
+            # Driver line
+            drv_label = translator.t('messages.install.summary.driver')
+            if driver_success is None:
+                drv_status = translator.t('messages.install.summary.not_run')
+            else:
+                # If driver returned already_present message, show that text
+                already_txt = translator.t('messages.vci_driver.already_present')
+                if driver_success and driver_msg and driver_msg.strip() == already_txt:
+                    drv_status = already_txt
+                else:
+                    if driver_success:
+                        drv_status = translator.t('messages.install.summary.ok')
+                    else:
+                        drv_status = translator.t('messages.install.summary.error', msg=(driver_msg or ''))
+            lines.append(f"-- {drv_label} : {drv_status}")
+
+            summary = "\n".join(lines)
+        except Exception as e:
+            logger.error(f"Failed to build install summary: {e}", exc_info=True)
+            summary = message or translator.t('messages.install.failed')
+
+        # Show summary
+        QtWidgets.QMessageBox.information(self, translator.t('messages.install.title'), summary)
+        
+        # Re-enable all buttons and combo box AFTER showing summary
+        self.set_buttons_enabled(True)
         
         # Reset footer after a delay
         QtCore.QTimer.singleShot(3000, self.reset_footer)
@@ -1498,6 +1742,11 @@ class MainWindow(QtWidgets.QWidget):
     def _on_runtimes_finished_from_installthread(self, success: bool, message: str):
         try:
             logger.info(f"[RUNTIMES] Finished callback invoked: success={success}, message={message[:100]}")
+            # Store runtimes result for summary
+            try:
+                self._runtimes_install_result = (success, message)
+            except Exception:
+                self._runtimes_install_result = (success, message)
             # Capture message immediately to avoid lambda late-binding issues
             msg = str(message) if message else translator.t('labels.ready')
             QtCore.QTimer.singleShot(0, lambda m=msg: self._set_runtimes_ui_running(False, m))
@@ -1513,6 +1762,18 @@ class MainWindow(QtWidgets.QWidget):
                 QtWidgets.QMessageBox.warning(self, translator.t('messages.install.title'), message)
         except Exception as e:
             logger.error(f"_on_manual_runtimes_finished error: {e}", exc_info=True)
+
+    def _on_driver_finished_from_installthread(self, success: bool, message: str):
+        """Handler for driver installation result emitted by InstallThread."""
+        try:
+            logger.info(f"[DRIVER] Finished callback invoked: success={success}")
+            # Store for final summary
+            try:
+                self._driver_install_result = (success, message)
+            except Exception:
+                self._driver_install_result = (success, message)
+        except Exception as e:
+            logger.error(f"_on_driver_finished_from_installthread error: {e}", exc_info=True)
 
     def install_diagbox(self):
         logger.info("Install Diagbox initiated")
@@ -1570,6 +1831,11 @@ class MainWindow(QtWidgets.QWidget):
         try:
             self.install_thread.runtimes_started.connect(self._on_runtimes_started_from_installthread)
             self.install_thread.runtimes_finished.connect(self._on_runtimes_finished_from_installthread)
+            # Connect driver finished signal so we can include it in the final summary
+            try:
+                self.install_thread.driver_finished.connect(self._on_driver_finished_from_installthread)
+            except Exception:
+                logger.debug("Failed to connect driver_finished signal")
             logger.info("[INSTALL] Runtimes signals connected successfully")
         except Exception as e:
             logger.error(f"[INSTALL] Failed to connect runtimes signals: {e}", exc_info=True)
@@ -1605,7 +1871,18 @@ class MainWindow(QtWidgets.QWidget):
             shortcut_path = os.path.join(public_desktop, shortcut)
             if os.path.exists(shortcut_path):
                 shortcuts_to_delete.append(shortcut_path)
-        
+
+        # Also detect specific VCI driver FileRepository folder and its .ini
+        vcomm_folder = r"C:\Windows\System32\DriverStore\FileRepository\vcommusb.inf_amd64_0cb1ee01f7e64ab9"
+        vcomm_ini = vcomm_folder + ".ini"
+        try:
+            if os.path.exists(vcomm_folder):
+                folders_to_delete.append(vcomm_folder)
+            if os.path.exists(vcomm_ini):
+                shortcuts_to_delete.append(vcomm_ini)
+        except Exception:
+            pass
+
         if not folders_to_delete and not shortcuts_to_delete:
             QtWidgets.QMessageBox.information(
                 self,
@@ -1613,18 +1890,43 @@ class MainWindow(QtWidgets.QWidget):
                 translator.t('messages.clean.nothing_to_clean')
             )
             return
-        
-        # Confirm deletion
+        # Prepare driver items separately so they are displayed in their own section
+        driver_items = []
+        try:
+            if vcomm_folder in folders_to_delete:
+                try:
+                    folders_to_delete.remove(vcomm_folder)
+                except Exception:
+                    pass
+                driver_items.append(vcomm_folder)
+            if vcomm_ini in shortcuts_to_delete:
+                try:
+                    shortcuts_to_delete.remove(vcomm_ini)
+                except Exception:
+                    pass
+                driver_items.append(vcomm_ini)
+        except Exception:
+            pass
+
+        # Confirm deletion - build sections: Folders, Shortcuts, Driver
         items_list = []
         if folders_to_delete:
             items_list.append("Folders:")
             items_list.extend([f"- {folder}" for folder in folders_to_delete])
+
         if shortcuts_to_delete:
             if items_list:
                 items_list.append("")
             items_list.append("Shortcuts:")
             items_list.extend([f"- {os.path.basename(s)}" for s in shortcuts_to_delete])
-        
+
+        if driver_items:
+            if items_list:
+                items_list.append("")
+            items_list.append("Driver:")
+            # Use a human-friendly label for the driver entry
+            items_list.append(f"- PSA XS Evolution (vcommusb.inf)")
+
         items_text = "\n".join(items_list)
         reply = QtWidgets.QMessageBox.question(
             self,
@@ -1652,8 +1954,13 @@ class MainWindow(QtWidgets.QWidget):
         if hasattr(self, 'footer_label'):
             self.footer_label.setText("Cleaning Diagbox...")
         
-        # Start cleaning in thread
-        self.clean_thread = CleanThread(folders_to_delete, shortcuts_to_delete)
+        # Start cleaning in thread (pass driver items separately)
+        try:
+            driver_items = driver_items  # defined earlier when building confirmation
+        except Exception:
+            driver_items = []
+
+        self.clean_thread = CleanThread(folders_to_delete, shortcuts_to_delete, driver_items)
         self.clean_thread.progress.connect(self.update_clean_progress)
         self.clean_thread.item_progress.connect(self.update_clean_item)
         self.clean_thread.finished.connect(self.on_clean_finished)
@@ -1706,48 +2013,99 @@ class MainWindow(QtWidgets.QWidget):
         QtCore.QTimer.singleShot(3000, self.reset_footer)
 
     def install_vci_driver(self):
-        """Install VCI Driver using ACTIAPnPInstaller.exe"""
-        logger.info("Install VCI Driver initiated")
-        driver_path = r"C:\AWRoot\extra\Drivers\xsevo\ACTIAPnPInstaller.exe"
-        
-        # Check if the installer exists
-        if not os.path.exists(driver_path):
-            logger.error(f"VCI Driver installer not found: {driver_path}")
-            QtWidgets.QMessageBox.warning(
-                self,
-                translator.t('messages.vci_driver.title'),
-                translator.t('messages.vci_driver.not_found', path=driver_path)
-            )
-            return
-        
+        """Install VCI Driver using DPInst (/PATH ... /S)"""
+        # Button handler: call unified installer and show result dialogs
+        logger.info("Install VCI Driver initiated (button)")
+        ok, msg = self._install_vci_driver_core()
+        if ok:
+            QtWidgets.QMessageBox.information(self, translator.t('messages.vci_driver.title'), msg)
+        else:
+            QtWidgets.QMessageBox.warning(self, translator.t('messages.vci_driver.title'), msg)
+
+    def _install_vci_driver_auto(self):
+        """Called automatically after runtimes installation completes.
+
+        This runs the same core installer but does not show modal dialogs; it
+        logs results and will show a non-blocking message only on failure.
+        """
+        logger.info("Automatic VCI Driver installation triggered")
         try:
-            # Run the installer with /nodisplay flag
-            result = subprocess.run(
-                [driver_path, "/nodisplay"],
+            ok, msg = self._install_vci_driver_core()
+            if not ok:
+                # Show a non-blocking warning to the user
+                QtWidgets.QMessageBox.warning(self, translator.t('messages.vci_driver.title'), msg)
+            else:
+                logger.info("Automatic VCI Driver install succeeded")
+        except Exception as e:
+            logger.error(f"Automatic VCI Driver installation error: {e}", exc_info=True)
+
+    def _install_vci_driver_core(self):
+        """Core installer used by both manual and automatic flows.
+
+        Returns (success: bool, message: str).
+        Also verifies installation by checking for the presence of the expected
+        .ini file in the DriverStore FileRepository.
+        """
+        logger.info("VCI Driver core installer starting")
+        # Use DPInst for driver installation per updated requirement
+        dpinst_path = r"C:\AWRoot\extra\drivers\xsevo\amd64\DPInst.exe"
+        dp_path_arg = r"C:\AWRoot\extra\drivers\xsevo\dp"
+        ini_check = r"C:\Windows\System32\DriverStore\FileRepository\vcommusb.inf_amd64_0cb1ee01f7e64ab9.ini"
+
+        if not os.path.exists(dpinst_path):
+            logger.error(f"DPInst not found: {dpinst_path}")
+            return False, translator.t('messages.vci_driver.not_found', path=dpinst_path)
+
+        # Quick check: if .ini already present, consider driver already installed
+        try:
+            if os.path.exists(ini_check):
+                logger.info("VCI .ini already present - driver considered installed")
+                return True, translator.t('messages.vci_driver.already_present')
+        except Exception:
+            pass
+
+        try:
+            logger.info(f"Launching DPInst with /PATH {dp_path_arg} (interactive mode) from {os.path.dirname(dpinst_path)}")
+            proc = subprocess.run(
+                [dpinst_path, '/PATH', dp_path_arg],
                 capture_output=True,
                 text=True,
-                creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
+                cwd=os.path.dirname(dpinst_path)
             )
-            
-            # Return code 0 = success, 6 = already installed or success with warning
-            if result.returncode == 0 or result.returncode == 6:
-                QtWidgets.QMessageBox.information(
-                    self,
-                    translator.t('messages.vci_driver.title'),
-                    translator.t('messages.vci_driver.success')
-                )
+            out = (proc.stdout or '').strip()
+            err = (proc.stderr or '').strip()
+            rc = proc.returncode
+            logger.debug(f"DPInst returned code={rc}")
+            if out:
+                logger.debug(f"DPInst stdout: {out[:2000]}")
+            if err:
+                logger.warning(f"DPInst stderr: {err[:2000]}")
+
+            # Consider 0 as success; 256 indicates success but reboot required
+            if rc == 0:
+                # Verify by checking for the .ini file
+                try:
+                    if os.path.exists(ini_check):
+                        msg = translator.t('messages.vci_driver.success')
+                        logger.info("VCI Driver installation verified via .ini presence")
+                        return True, msg
+                    else:
+                        logger.warning("DPInst returned success but .ini not found")
+                        return False, translator.t('messages.vci_driver.warning', code=rc)
+                except Exception as e:
+                    logger.error(f"Error while verifying VCI .ini existence: {e}")
+                    return False, translator.t('messages.vci_driver.error', error=str(e))
+            elif rc == 256:
+                # Some DPInst return codes indicate a reboot is required; treat as success but advise reboot
+                msg = translator.t('messages.vci_driver.success_reboot')
+                logger.info("DPInst reported reboot required; treating as success requiring reboot")
+                return True, msg
             else:
-                QtWidgets.QMessageBox.warning(
-                    self,
-                    translator.t('messages.vci_driver.title'),
-                    translator.t('messages.vci_driver.warning', code=result.returncode)
-                )
+                logger.warning(f"DPInst failed with code {rc}: {err[:400]}")
+                return False, translator.t('messages.vci_driver.warning', code=rc) + "\n" + (err or '')
         except Exception as e:
-            QtWidgets.QMessageBox.critical(
-                self,
-                translator.t('messages.vci_driver.title'),
-                translator.t('messages.vci_driver.error', error=str(e))
-            )
+            logger.error(f"DPInst installation exception: {e}", exc_info=True)
+            return False, translator.t('messages.vci_driver.error', error=str(e))
 
     def launch_diagbox(self):
         """Launch Diagbox application"""
@@ -2035,16 +2393,29 @@ class MainWindow(QtWidgets.QWidget):
 
             try:
                 if getattr(sys, 'frozen', False):
-                    # Prefer a bundled native updater executable when frozen
+                    # When frozen, BASE points to a temp _MEIPASS folder that gets cleaned up.
+                    # Copy the bundled updater to a persistent location (CONFIG_DIR) before invoking it.
+                    # Priority: standalone updater.exe in tools/, then onedir updater/updater.exe
+                    bundled_updater_standalone = BASE / 'tools' / 'updater.exe'
                     bundled_updater_dir = BASE / 'tools' / 'updater' / 'updater.exe'
-                    bundled_updater_single = BASE / 'tools' / 'updater.exe'
-                    if bundled_updater_dir.exists():
-                        cmd = [str(bundled_updater_dir), '--target', str(current_exe), '--new', str(download_path), '--wait-pid', str(os.getpid()), '--restart']
-                    elif bundled_updater_single.exists():
-                        # legacy single-exe in tools/ (may be onefile)
-                        cmd = [str(bundled_updater_single), '--target', str(current_exe), '--new', str(download_path), '--wait-pid', str(os.getpid()), '--restart']
+                    persistent_updater = CONFIG_DIR / 'updater.exe'
+                    
+                    # Ensure CONFIG_DIR exists
+                    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+                    
+                    # Copy bundled updater to persistent location if found
+                    if bundled_updater_standalone.exists():
+                        logger.info(f"Copying standalone updater from {bundled_updater_standalone} to {persistent_updater}")
+                        shutil.copy2(bundled_updater_standalone, persistent_updater)
+                    elif bundled_updater_dir.exists():
+                        logger.info(f"Copying onedir updater from {bundled_updater_dir} to {persistent_updater}")
+                        shutil.copy2(bundled_updater_dir, persistent_updater)
+                    
+                    # Use the persistent copy if it exists
+                    if persistent_updater.exists():
+                        cmd = [str(persistent_updater), '--target', str(current_exe), '--new', str(download_path), '--wait-pid', str(os.getpid()), '--restart']
                     else:
-                        # Try system python to run updater.py (best-effort)
+                        # Fallback: Try system python to run updater.py (best-effort)
                         python_bin = shutil.which('python') or shutil.which('python3') or shutil.which('py')
                         if python_bin:
                             cmd = [python_bin, str(updater_script), '--target', str(current_exe), '--new', str(download_path), '--wait-pid', str(os.getpid()), '--restart']
@@ -2415,19 +2786,6 @@ class MainWindow(QtWidgets.QWidget):
             msg = translator.t('messages.install.runtimes.error', error=str(e))
             logger.error(msg, exc_info=True)
             self.manual_runtimes_finished.emit(False, msg)
-
-    def _on_runtimes_started_from_installthread(self):
-        try:
-            QtCore.QTimer.singleShot(0, lambda: self._set_runtimes_ui_running(True, translator.t('messages.install.runtimes.started')))
-        except Exception as e:
-            logger.debug(f"_on_runtimes_started_from_installthread error: {e}")
-
-    def _on_runtimes_finished_from_installthread(self, success: bool, message: str):
-        try:
-            QtCore.QTimer.singleShot(0, lambda: self._set_runtimes_ui_running(False, message))
-        except Exception as e:
-            logger.debug(f"_on_runtimes_finished_from_installthread error: {e}")
-
     def switch_page(self, index, button):
         # uncheck all sibling buttons in sidebar
         sidebar = self.findChild(QtWidgets.QFrame, "sidebar")
@@ -2493,7 +2851,7 @@ class MainWindow(QtWidgets.QWidget):
         try:
             installed = self.check_installed_version()
             latest = self.get_latest_available_version()
-            logger.info(f"on_enter_install_page: installed={installed!r}, latest={latest!r}")
+            # logger.info(f"on_enter_install_page: installed={installed!r}, latest={latest!r}")
             if not latest:
                 return
 
@@ -2515,10 +2873,10 @@ class MainWindow(QtWidgets.QWidget):
                 self.install_banner_label.setText(text)
             if hasattr(self, 'install_banner'):
                 before = self.install_banner.isVisible()
-                logger.info(f"install_banner before visible={before}")
+                # logger.info(f"install_banner before visible={before}")
                 self.install_banner.setVisible(True)
                 after = self.install_banner.isVisible()
-                logger.info(f"install_banner after visible={after}")
+                # logger.info(f"install_banner after visible={after}")
             # Show or hide the Download button depending on state. If we are
             # already up-to-date, hide the download action to avoid confusion.
             try:
@@ -2843,10 +3201,16 @@ class MainWindow(QtWidgets.QWidget):
         layout = QtWidgets.QVBoxLayout(w)
         layout.setSpacing(10)
         
-        # Top section with logo and version
+        # Top section with logo/version (left) and changelog (right)
         top_section = QtWidgets.QWidget()
         top_layout = QtWidgets.QHBoxLayout(top_section)
         top_layout.setContentsMargins(0, 0, 0, 0)
+        top_layout.setSpacing(10)
+        
+        # Left: Logo and version
+        left_section = QtWidgets.QWidget()
+        left_layout = QtWidgets.QVBoxLayout(left_section)
+        left_layout.setContentsMargins(0, 0, 0, 0)
         
         logo = QtWidgets.QLabel()
         pix = QtGui.QPixmap(str(BASE / "icons" / "logo.png"))
@@ -2855,14 +3219,59 @@ class MainWindow(QtWidgets.QWidget):
             logo.setPixmap(pix)
         else:
             logo.setText("Logo non disponible")
-        top_layout.addWidget(logo)
+        left_layout.addWidget(logo)
         
         version_label = QtWidgets.QLabel(translator.t('labels.version', version=APP_VERSION))
         version_label.setStyleSheet("font-size: 14px;")
-        top_layout.addWidget(version_label)
-        top_layout.addStretch()
+        left_layout.addWidget(version_label)
+        left_layout.addStretch()
+        
+        top_layout.addWidget(left_section)
+        
+        # Right: Changelog frame
+        changelog_frame = QtWidgets.QFrame()
+        changelog_frame.setObjectName("changelogFrame")
+        changelog_frame.setStyleSheet("""
+            #changelogFrame {
+                background-color: #2a2a2a;
+                border: 1px solid #3a3a3a;
+                border-radius: 6px;
+                padding: 10px;
+            }
+        """)
+        changelog_frame.setMinimumWidth(300)
+        changelog_frame.setMaximumWidth(400)
+        changelog_layout = QtWidgets.QVBoxLayout(changelog_frame)
+        changelog_layout.setContentsMargins(10, 10, 10, 10)
+        changelog_layout.setSpacing(8)
+        
+        changelog_title = QtWidgets.QLabel("📋 Changelog")
+        changelog_title.setStyleSheet("font-size: 14px; font-weight: bold; color: #ffffff;")
+        changelog_layout.addWidget(changelog_title)
+        
+        self.changelog_text = QtWidgets.QTextEdit()
+        self.changelog_text.setReadOnly(True)
+        self.changelog_text.setStyleSheet("""
+            QTextEdit {
+                background-color: #1e1e1e;
+                color: #d4d4d4;
+                font-family: 'Segoe UI', Arial, sans-serif;
+                font-size: 11px;
+                border: 1px solid #3a3a3a;
+                border-radius: 4px;
+                padding: 8px;
+            }
+        """)
+        self.changelog_text.setPlainText("Loading changelog...")
+        self.changelog_text.setMinimumHeight(150)
+        changelog_layout.addWidget(self.changelog_text)
+        
+        top_layout.addWidget(changelog_frame)
         
         layout.addWidget(top_section)
+        
+        # Load changelog asynchronously
+        QtCore.QTimer.singleShot(500, self.load_changelog)
         
         # Toggle console button
         self.toggle_log_btn = QtWidgets.QPushButton(translator.t('buttons.hide_console'))
@@ -2919,6 +3328,55 @@ class MainWindow(QtWidgets.QWidget):
         
         layout.addStretch()
         return w
+    
+    def load_changelog(self):
+        """Load changelog from GitHub release for current app version"""
+        try:
+            # Build GitHub API URL for the release matching current version
+            version_tag = f"v{APP_VERSION}"
+            api_url = f"https://api.github.com/repos/RetroGameSets/PSA-DIAG/releases/tags/{version_tag}"
+            
+            logger.info(f"Fetching changelog from: {api_url}")
+            response = requests.get(api_url, timeout=5)
+            
+            if response.status_code == 200:
+                data = response.json()
+                body = data.get('body', '')
+                
+                if body:
+                    # Extract the changelog from the body
+                    # The body format from build.yml is:
+                    # ## PSA-DIAG x.x.x.x
+                    # ### Installation
+                    # ...
+                    # ### Changes
+                    # - commit message
+                    
+                    # Try to extract just the Changes section
+                    if '### Changes' in body:
+                        changes_section = body.split('### Changes', 1)[1].strip()
+                        # Remove any trailing markdown sections
+                        if '###' in changes_section:
+                            changes_section = changes_section.split('###', 1)[0].strip()
+                        changelog_content = changes_section
+                    else:
+                        # Fallback: use entire body
+                        changelog_content = body
+                    
+                    self.changelog_text.setPlainText(changelog_content)
+                    logger.info("Changelog loaded successfully")
+                else:
+                    self.changelog_text.setPlainText("No changelog available for this version.")
+            elif response.status_code == 404:
+                self.changelog_text.setPlainText(f"Release {version_tag} not found on GitHub.\n\nThis may be a development version.")
+                logger.warning(f"Release {version_tag} not found (404)")
+            else:
+                self.changelog_text.setPlainText(f"Failed to load changelog (HTTP {response.status_code})")
+                logger.warning(f"Failed to fetch changelog: HTTP {response.status_code}")
+                
+        except Exception as e:
+            logger.error(f"Error loading changelog: {e}", exc_info=True)
+            self.changelog_text.setPlainText(f"Error loading changelog:\n{str(e)}")
     
     def toggle_console(self):
         """Toggle console visibility"""

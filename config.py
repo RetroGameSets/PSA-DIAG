@@ -5,7 +5,7 @@ import os
 CONFIG_DIR = Path(os.getenv('APPDATA', Path.home())) / 'PSA_DIAG'
 
 # Application version (keep in sync with release tags)
-APP_VERSION = "2.1.0.9"
+APP_VERSION = "2.2.0.0"
 
 # Remote endpoints
 URL_LAST_VERSION_PSADIAG = "https://psa-diag.fr/diagbox/install/last_version_psadiag.json"

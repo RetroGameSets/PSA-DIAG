@@ -85,6 +85,15 @@
         "failed": "Runtimes installer returned code: {code}",
         "error": "Runtimes installer error: {error}"
       }
+      ,
+      "summary": {
+        "diagbox": "Diagbox Installation",
+        "runtimes": "Runtimes Installation",
+        "driver": "Driver Installation",
+        "ok": "OK",
+        "error": "Error: {msg}",
+        "not_run": "Not run"
+      }
     },
     "clean": {
       "title": "Clean Diagbox",
@@ -99,7 +108,9 @@
       "title": "Install VCI Driver",
       "not_found": "VCI Driver installer not found.\n\nExpected location:\n{path}\n\nPlease install Diagbox first.",
       "success": "VCI Driver installed successfully.",
+      "success_reboot": "VCI Driver installed successfully. A reboot may be required to complete the installation.",
       "warning": "VCI Driver installation returned code: {code}\n\nThe driver may already be installed or require a reboot.",
+      "already_present": "VCI Driver already installed (files present).",
       "error": "Failed to install VCI Driver:\n\n{error}"
     },
     "launch": {
