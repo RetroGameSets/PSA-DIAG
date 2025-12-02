@@ -140,6 +140,7 @@
       "no_asset": "Could not find a downloadable .exe asset in the latest release.",
       "no_updater": "Updater helper not found. Update cannot proceed.",
       "launch_failed": "Failed to launch updater: {error}",
+      "closing_app": "The application will now close to apply the update.\n\nThe updater will start automatically.",
       "started": "Update started. The application will now close so the updater can replace the executable.",
       "failed": "Self-update failed: {error}",
       "error": "Error",

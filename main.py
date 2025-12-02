@@ -2427,25 +2427,40 @@ class MainWindow(QtWidgets.QWidget):
                     # Running from source/interpreter: use current python interpreter
                     cmd = [sys.executable, str(updater_script), '--target', str(current_exe), '--new', str(download_path), '--wait-pid', str(os.getpid()), '--restart']
 
-                # Add a longer timeout for handle release and launch updater
-                cmd.extend(['--timeout', '120'])
+                # Add timeout for handle release (reduced to 15s since process exits quickly)
+                cmd.extend(['--timeout', '15'])
                 logger.info(f"Launching updater helper: {cmd}")
+                
+                # Close the application FIRST to release all handles and temp folders
+                # before launching the updater (prevents temp folder deletion warnings)
+                try:
+                    # Shutdown logging to help release any file handles held by this process
+                    import logging as _logging
+                    _logging.shutdown()
+                except Exception:
+                    pass
+                
+                # Show a brief message to user before closing
+                QtWidgets.QMessageBox.information(
+                    self, 
+                    translator.t('messages.update.title'),
+                    translator.t('messages.update.closing_app')
+                )
+                
+                # Launch updater with a small delay to ensure clean shutdown
                 # Ensure updater window is visible: do NOT use CREATE_NO_WINDOW for updater
                 creationflags_for_updater = 0
                 subprocess.Popen(cmd, creationflags=creationflags_for_updater)
+                
+                # Give subprocess time to start and PyInstaller time to finish cleanup
+                # This prevents the temp folder warning
+                QtCore.QThread.msleep(500)
             except Exception as e:
                 logger.error(f"Failed to launch updater helper: {e}")
                 QtWidgets.QMessageBox.warning(self, translator.t('messages.update.title'), translator.t('messages.update.launch_failed', error=str(e)))
                 return
 
-            # Inform user and quit application to allow updater to replace the exe
-            try:
-                # Shutdown logging to help release any file handles held by this process
-                import logging as _logging
-                _logging.shutdown()
-            except Exception:
-                pass
-            # Close the application immediately so the updater can replace the executable
+            # Close the application to allow updater to replace the executable
             QtWidgets.QApplication.quit()
 
         except Exception as e:

@@ -16,22 +16,52 @@ except Exception:
 
 def wait_for_pid(pid, timeout=30, logger=None):
     start = time.time()
+    # Give the process a moment to start closing
+    time.sleep(0.5)
+    
+    # Check if process exists at all first
+    process_exists = False
+    try:
+        import psutil
+        process_exists = psutil.pid_exists(pid)
+    except Exception:
+        try:
+            proc = subprocess.run(["tasklist", "/FI", f"PID eq {pid}"], capture_output=True, text=True)
+            process_exists = str(pid) in proc.stdout
+        except Exception:
+            pass
+    
+    # If process doesn't exist at all, return immediately
+    if not process_exists:
+        if logger:
+            logger(f"Target process {pid} already closed.")
+        return True
+    
+    # Wait for process to exit
     while time.time() - start < timeout:
         try:
             import psutil
             if not psutil.pid_exists(pid):
+                if logger:
+                    logger(f"Process {pid} has exited.")
                 return True
         except Exception:
             try:
                 proc = subprocess.run(["tasklist", "/FI", f"PID eq {pid}"], capture_output=True, text=True)
                 if str(pid) not in proc.stdout:
+                    if logger:
+                        logger(f"Process {pid} has exited.")
                     return True
             except Exception:
+                # If we can't check, assume it's gone
                 return True
 
         if logger:
-            logger(f"PLEASE CLOSE PSA-DIAG FIRST.. MERCI DE QUITTER L'APPLICATION PSA-DIAG..")
+            logger(f"Please wait, updating...")
         time.sleep(0.5)
+    
+    if logger:
+        logger(f"Timeout waiting for process {pid} to exit.")
     return False
 
 
