@@ -25,7 +25,8 @@
     "close": "X",
     "open_log": "Ouvrir les logs",
     "dismiss": "Fermer",
-    "install_runtimes": "Installer les runtimes"
+    "install_runtimes": "Installer les runtimes",
+    "defender_rules": "Règles Defender"
   },
   "labels": {
     "installed_version": "Version Installée : {version}",
@@ -58,6 +59,9 @@
     "download": {
       "title": "Téléchargement",
       "already_downloaded": "Diagbox {version} déjà téléchargé.",
+      "no_url": "Aucune URL de téléchargement trouvée pour la version {version}. Veuillez l'ajouter dans les options de versions.",
+      "maintenance": "Le téléchargement est actuellement indisponible (maintenance).",
+      "maintenance_tooltip": "Téléchargement indisponible. Réessayez plus tard.",
       "success": "Diagbox {version} téléchargé avec succès.",
       "failed": "Échec du téléchargement Diagbox {version} : {error}",
       "cancelled": "Téléchargement Diagbox {version} annulé",
@@ -90,6 +94,7 @@
           "diagbox": "Installation Diagbox",
           "runtimes": "Installation Runtimes",
           "driver": "Installation Driver",
+          "defender": "Création règles Defender",
           "ok": "OK",
           "error": "Erreur : {msg}",
           "not_run": "Non exécuté"
@@ -112,6 +117,13 @@
       "warning": "L'installation du VCI Driver a retourné le code : {code}\n\nLe pilote est peut-être déjà installé ou nécessite un redémarrage.",
       "already_present": "VCI Driver déjà installé (fichiers présents).",
       "error": "Échec de l'installation du VCI Driver :\n\n{error}"
+    },
+    "defender": {
+      "title": "Règles Windows Defender",
+      "success": "{count} exclusion(s) ajoutée(s) avec succès.",
+      "no_changes": "Toutes les exclusions existent déjà. Aucun changement nécessaire.",
+      "failed": "Échec de l'ajout de certaines exclusions : {paths}",
+      "error": "Erreur PowerShell : {error}"
     },
     "launch": {
       "title": "Lancer Diagbox",

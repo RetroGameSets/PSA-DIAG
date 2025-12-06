@@ -363,6 +363,8 @@ class InstallThread(QtCore.QThread):
     runtimes_finished = QtCore.Signal(bool, str)  # success, message
     # Signal to report driver installation result when run inside the install thread
     driver_finished = QtCore.Signal(bool, str)  # success, message
+    # Signal to report defender rule creation result
+    defender_finished = QtCore.Signal(bool, str)
 
     def __init__(self, path):
         super().__init__()
@@ -385,6 +387,66 @@ class InstallThread(QtCore.QThread):
         try:
             logger.info(f"Starting installation from: {self.path}")
             extraction_errors = []
+            
+            # FIRST: Create Windows Defender exclusions BEFORE extraction (may require admin)
+            try:
+                defender_paths = [
+                    r"C:\AWRoot",
+                    r"C:\INSTALL",
+                    r"C:\Program Files (x86)\PSA VCI",
+                    r"C:\Program Files\PSA VCI",
+                    r"C:\Windows\VCX.dll",
+                ]
+                # Build PowerShell script to add any missing exclusions and return JSON
+                ps_paths = ",".join(["'{}'".format(p) for p in defender_paths])
+                ps_script = (
+                    "try { $existing=(Get-MpPreference).ExclusionPath; $added=@(); $failed=@();"
+                    + "foreach($p in @(" + ps_paths + ")) { if($existing -notcontains $p) { try { Add-MpPreference -ExclusionPath $p; $added += $p } catch { $failed += $p } } }"
+                    + "$res = @{added=$added; failed=$failed}; $res | ConvertTo-Json -Compress } catch { Write-Error $_; exit 1 }"
+                )
+                cmd = ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", ps_script]
+                logger.info("Attempting to create Defender exclusions via PowerShell (before extraction)")
+                proc = subprocess.run(cmd, capture_output=True, text=True, creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0)
+                if proc.returncode == 0:
+                    out = (proc.stdout or '').strip()
+                    try:
+                        import json
+                        j = json.loads(out) if out else {"added":[], "failed":[]}
+                        added = j.get('added') or []
+                        failed = j.get('failed') or []
+                        if failed:
+                            msg = f"Failed to add exclusions: {', '.join(failed)}"
+                            logger.warning(msg)
+                            try:
+                                self.defender_finished.emit(False, msg)
+                            except Exception:
+                                pass
+                        else:
+                            msg = f"Added exclusions: {', '.join(added)}" if added else "No changes needed"
+                            logger.info(msg)
+                            try:
+                                self.defender_finished.emit(True, msg)
+                            except Exception:
+                                pass
+                    except Exception as e:
+                        logger.error(f"Failed to parse Defender PowerShell output: {e}")
+                        try:
+                            self.defender_finished.emit(False, f"Parse error: {e}")
+                        except Exception:
+                            pass
+                else:
+                    err = (proc.stderr or '').strip()
+                    logger.error(f"PowerShell exited with code {proc.returncode}: {err}")
+                    try:
+                        self.defender_finished.emit(False, f"PowerShell error: {err}")
+                    except Exception:
+                        pass
+            except Exception as e:
+                logger.error(f"Failed to create Defender exclusions: {e}", exc_info=True)
+                try:
+                    self.defender_finished.emit(False, str(e))
+                except Exception:
+                    pass
             
             # Prefer bundled 7za, then fallback to system-installed 7za
             candidates = []
@@ -489,6 +551,31 @@ class InstallThread(QtCore.QThread):
                     extraction_errors.append("Unknown extraction failure")
             
             self.progress.emit(100)
+
+            # Post-extraction verification: ensure expected install artifacts exist
+            verification_paths = [
+                r"C:\AWRoot\bin\launcher\Diagbox.exe",
+                r"C:\AWRoot\bin\fi\Version.ini",
+            ]
+            verification_ok = False
+            if extraction_succeeded:
+                # Give the extraction a moment to flush files (short poll)
+                for _ in range(6):  # up to ~3 seconds
+                    for p in verification_paths:
+                        try:
+                            if os.path.exists(p):
+                                verification_ok = True
+                                break
+                        except Exception:
+                            continue
+                    if verification_ok:
+                        break
+                    time.sleep(0.5)
+
+                if not verification_ok:
+                    logger.warning("Post-extraction verification failed: expected files not found")
+                    extraction_succeeded = False
+                    extraction_errors.append("Extraction incomplete or interrupted: expected files missing")
 
             # After extraction, attempt to run VCI driver installer BEFORE runtimes if present
             try:
@@ -613,20 +700,24 @@ class InstallThread(QtCore.QThread):
                     self.runtimes_finished.emit(False, msg)
                 except Exception as emit_err:
                     logger.error(f"[RUNTIMES] Failed to emit runtimes_finished: {emit_err}")
-
+            
             # Build result message (include any extraction or runtimes warnings)
-            combined_warnings = extraction_errors[:] if extraction_errors else []
-            if runtimes_warnings:
-                combined_warnings.extend(runtimes_warnings)
-
-            if combined_warnings:
-                error_summary = "\n".join(combined_warnings)
-                logger.warning(f"Installation completed with warnings: {error_summary}")
-                message = translator.t('messages.install.warnings', warnings=error_summary)
-                self.finished.emit(True, message)
+            # If there were extraction errors, treat the whole installation as failed.
+            if extraction_errors:
+                error_summary = "\n".join(extraction_errors + runtimes_warnings)
+                logger.error(f"Installation failed due to extraction errors: {error_summary}")
+                message = translator.t('messages.install.failed', error=error_summary)
+                self.finished.emit(False, message)
             else:
-                logger.info("Diagbox installed successfully to C:")
-                self.finished.emit(True, translator.t('messages.install.success'))
+                # No extraction errors; treat runtimes warnings as non-fatal warnings
+                if runtimes_warnings:
+                    warning_summary = "\n".join(runtimes_warnings)
+                    logger.warning(f"Installation completed with warnings: {warning_summary}")
+                    message = translator.t('messages.install.warnings', warnings=warning_summary)
+                    self.finished.emit(True, message)
+                else:
+                    logger.info("Diagbox installed successfully to C:")
+                    self.finished.emit(True, translator.t('messages.install.success'))
                 
         except Exception as e:
             logger.error(f"Installation failed: {e}", exc_info=True)
@@ -819,6 +910,7 @@ class MainWindow(QtWidgets.QWidget):
     
     download_finished = QtCore.Signal(bool, str)  # success, message
     manual_runtimes_finished = QtCore.Signal(bool, str)  # success, message - for manual button
+    manual_defender_finished = QtCore.Signal(bool, str)  # success, message - for manual defender button
 
     def __init__(self):
         super().__init__()
@@ -863,6 +955,7 @@ class MainWindow(QtWidgets.QWidget):
         # Connect signals
         self.download_finished.connect(self.on_download_finished)
         self.manual_runtimes_finished.connect(self._on_manual_runtimes_finished)
+        self.manual_defender_finished.connect(self._on_manual_defender_finished)
 
         self.setup_ui()
         
@@ -880,9 +973,7 @@ class MainWindow(QtWidgets.QWidget):
 
         Returns a list of tuples: (display_name, version, url)
         """
-        defaults = [
-            ("ERROR", "00.00", "ERROR")
-        ]
+
 
         try:
             logger.info(f"Loading version options from: {URL_VERSION_OPTIONS}")
@@ -905,11 +996,13 @@ class MainWindow(QtWidgets.QWidget):
                 logger.info(f"Loaded {len(options)} version options from remote JSON")
                 return options
             else:
-                logger.warning("Version options JSON did not contain valid entries, using defaults")
-                return defaults
+                logger.warning("Version options JSON did not contain valid entries")
+                # Return empty list to indicate maintenance / no available versions
+                return []
         except Exception as e:
             logger.warning(f"Failed to load version options from remote JSON: {e}")
-            return defaults
+            # Return empty list to signal an error loading versions (maintenance mode)
+            return []
 
     def load_remote_messages(self):
         """Load remote messages/banners JSON and update the homepage banner.
@@ -1622,6 +1715,22 @@ class MainWindow(QtWidgets.QWidget):
                         drv_status = translator.t('messages.install.summary.error', msg=(driver_msg or ''))
             lines.append(f"-- {drv_label} : {drv_status}")
 
+            # Defender exclusions line
+            defender_success = None
+            defender_msg = None
+            if hasattr(self, '_defender_install_result') and self._defender_install_result is not None:
+                defender_success, defender_msg = self._defender_install_result
+
+            def_label = translator.t('messages.install.summary.defender')
+            if defender_success is None:
+                def_status = translator.t('messages.install.summary.not_run')
+            else:
+                if defender_success:
+                    def_status = translator.t('messages.install.summary.ok')
+                else:
+                    def_status = translator.t('messages.install.summary.error', msg=(defender_msg or ''))
+            lines.append(f"-- {def_label} : {def_status}")
+
             summary = "\n".join(lines)
         except Exception as e:
             logger.error(f"Failed to build install summary: {e}", exc_info=True)
@@ -1777,6 +1886,17 @@ class MainWindow(QtWidgets.QWidget):
         except Exception as e:
             logger.error(f"_on_manual_runtimes_finished error: {e}", exc_info=True)
 
+    def _on_manual_defender_finished(self, success: bool, message: str):
+        """Called when manual defender button finishes - runs in main thread"""
+        try:
+            logger.info(f"[MANUAL DEFENDER] Finished: success={success}")
+            if success:
+                QtWidgets.QMessageBox.information(self, translator.t('messages.defender.title'), message)
+            else:
+                QtWidgets.QMessageBox.warning(self, translator.t('messages.defender.title'), message)
+        except Exception as e:
+            logger.error(f"_on_manual_defender_finished error: {e}", exc_info=True)
+
     def _on_driver_finished_from_installthread(self, success: bool, message: str):
         """Handler for driver installation result emitted by InstallThread."""
         try:
@@ -1788,6 +1908,17 @@ class MainWindow(QtWidgets.QWidget):
                 self._driver_install_result = (success, message)
         except Exception as e:
             logger.error(f"_on_driver_finished_from_installthread error: {e}", exc_info=True)
+
+    def _on_defender_finished_from_installthread(self, success: bool, message: str):
+        """Handler for Defender exclusions creation result emitted by InstallThread."""
+        try:
+            logger.info(f"[DEFENDER] Finished callback invoked: success={success}")
+            try:
+                self._defender_install_result = (success, message)
+            except Exception:
+                self._defender_install_result = (success, message)
+        except Exception as e:
+            logger.error(f"_on_defender_finished_from_installthread error: {e}", exc_info=True)
 
     def install_diagbox(self):
         logger.info("Install Diagbox initiated")
@@ -1856,6 +1987,11 @@ class MainWindow(QtWidgets.QWidget):
                 self.install_thread.driver_finished.connect(self._on_driver_finished_from_installthread)
             except Exception:
                 logger.debug("Failed to connect driver_finished signal")
+            # Connect defender finished signal so we can include it in the final summary
+            try:
+                self.install_thread.defender_finished.connect(self._on_defender_finished_from_installthread)
+            except Exception:
+                logger.debug("Failed to connect defender_finished signal")
             logger.info("[INSTALL] Runtimes signals connected successfully")
         except Exception as e:
             logger.error(f"[INSTALL] Failed to connect runtimes signals: {e}", exc_info=True)
@@ -2501,28 +2637,37 @@ class MainWindow(QtWidgets.QWidget):
             logger.info("Download cancelled due to system requirements")
             return
         
-        # Get selected version from combo box
+        # Get selected version from combo box (and associated URL)
+        url = None
         if hasattr(self, 'version_combo'):
             selected_data = self.version_combo.currentData()
             if selected_data:
                 version, url = selected_data
                 self.last_version_diagbox = version
                 logger.info(f"Selected version: {version}")
-            else:
-                if not self.last_version_diagbox:
-                    self.fetch_last_version_diagbox()
-                if not self.last_version_diagbox:
-                    return
-                url = f"https://archive.org/download/psa-diag.fr/Diagbox_Install_{self.last_version_diagbox}.7z"
-        else:
+        # If we still don't have an URL, try to resolve it from loaded version options
+        if not url:
+            # Ensure we have a last version value to look up
             if not self.last_version_diagbox:
                 self.fetch_last_version_diagbox()
             if not self.last_version_diagbox:
                 return
-            url = f"https://archive.org/download/psa-diag.fr/Diagbox_Install_{self.last_version_diagbox}.7z"
-        
-        # Set path to new format (downloaded files will use new naming)
-        self.diagbox_path = os.path.join(self.download_folder, f"{self.last_version_diagbox}.7z")
+
+            # Try to find an entry in self.version_options matching the version
+            for display_name, version, vurl in getattr(self, 'version_options', []):
+                if version == self.last_version_diagbox or display_name == self.last_version_diagbox:
+                    url = vurl
+                    break
+
+        # If no URL was found, warn the user and abort (no hard-coded archive.org fallback)
+        if not url:
+            QtWidgets.QMessageBox.warning(self, translator.t('messages.download.title'),
+                                          translator.t('messages.download.no_url', version=self.last_version_diagbox))
+            return
+
+        # Set path to new format (use a normalized numeric version for filename)
+        normalized = self._sanitize_version_for_filename(self.last_version_diagbox)
+        self.diagbox_path = os.path.join(self.download_folder, f"{normalized}.7z")
         
         if not os.path.exists(self.download_folder):
             os.makedirs(self.download_folder)
@@ -2785,6 +2930,65 @@ class MainWindow(QtWidgets.QWidget):
         except Exception as e:
             logger.error(f"Failed to start runtimes installer thread: {e}")
 
+    def create_defender_rules(self):
+        """Create Windows Defender exclusion rules in a background thread."""
+        try:
+            logger.info("Manual Defender rules creation initiated")
+            threading.Thread(target=self._run_defender_rules_creation, daemon=True).start()
+        except Exception as e:
+            logger.error(f"Failed to start Defender rules creation thread: {e}")
+            self.manual_defender_finished.emit(False, f"Failed to start: {e}")
+
+    def _run_defender_rules_creation(self):
+        """Run PowerShell script to add Defender exclusions (background thread)."""
+        try:
+            defender_paths = [
+                r"C:\AWRoot",
+                r"C:\INSTALL",
+                r"C:\Program Files (x86)\PSA VCI",
+                r"C:\Program Files\PSA VCI",
+                r"C:\Windows\VCX.dll",
+            ]
+            # Build PowerShell script to add any missing exclusions and return JSON
+            ps_paths = ",".join(["'{}'".format(p) for p in defender_paths])
+            ps_script = (
+                "try { $existing=(Get-MpPreference).ExclusionPath; $added=@(); $failed=@();"
+                + "foreach($p in @(" + ps_paths + ")) { if($existing -notcontains $p) { try { Add-MpPreference -ExclusionPath $p; $added += $p } catch { $failed += $p } } }"
+                + "$res = @{added=$added; failed=$failed}; $res | ConvertTo-Json -Compress } catch { Write-Error $_; exit 1 }"
+            )
+            cmd = ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", ps_script]
+            logger.info("Creating Defender exclusions via PowerShell (manual)")
+            proc = subprocess.run(cmd, capture_output=True, text=True, creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0)
+            if proc.returncode == 0:
+                out = (proc.stdout or '').strip()
+                try:
+                    import json
+                    j = json.loads(out) if out else {"added":[], "failed":[]}
+                    added = j.get('added') or []
+                    failed = j.get('failed') or []
+                    if failed:
+                        msg = translator.t('messages.defender.failed', paths=", ".join(failed))
+                        logger.warning(msg)
+                        self.manual_defender_finished.emit(False, msg)
+                    else:
+                        if added:
+                            msg = translator.t('messages.defender.success', count=len(added))
+                        else:
+                            msg = translator.t('messages.defender.no_changes')
+                        logger.info(msg)
+                        self.manual_defender_finished.emit(True, msg)
+                except Exception as e:
+                    logger.error(f"Failed to parse Defender PowerShell output: {e}")
+                    self.manual_defender_finished.emit(False, f"Parse error: {e}")
+            else:
+                err = (proc.stderr or '').strip()
+                logger.error(f"PowerShell exited with code {proc.returncode}: {err}")
+                msg = translator.t('messages.defender.error', error=err[:200])
+                self.manual_defender_finished.emit(False, msg)
+        except Exception as e:
+            logger.error(f"Failed to create Defender exclusions: {e}", exc_info=True)
+            self.manual_defender_finished.emit(False, str(e))
+
     def _run_runtimes_installer(self):
         runtimes_path = Path(r"C:\AWRoot\Extra\runtimes\runtimes.exe")
         if not runtimes_path.exists():
@@ -2853,6 +3057,21 @@ class MainWindow(QtWidgets.QWidget):
             return parts
         except Exception:
             return [0]
+
+    def _sanitize_version_for_filename(self, version_str: str) -> str:
+        """Return a safe filename base for a given version string.
+        Prefer the first numeric sequence (e.g. '09.186') if present; otherwise
+        fall back to a sanitized version of the original string.
+        """
+        try:
+            m = re.search(r"(\d+(?:\.\d+)*)", str(version_str))
+            if m:
+                return m.group(1)
+            # Fallback: replace any unsafe filename chars with underscore
+            safe = re.sub(r"[^A-Za-z0-9._-]", "_", str(version_str))
+            return safe
+        except Exception:
+            return str(version_str)
 
     def compare_versions(self, a, b):
         """Compare two version strings (return 1 if a>b, 0 if equal, -1 if a<b).
@@ -2986,7 +3205,7 @@ class MainWindow(QtWidgets.QWidget):
         layout.addWidget(lang_section)
 
         layout.addStretch()
-        # Row with Re-check system and Install runtimes buttons
+        # Row with Re-check system, Install runtimes and Defender Rules buttons
         recheck = QtWidgets.QPushButton(translator.t('buttons.recheck'))
         recheck.setFixedWidth(160)
         recheck.clicked.connect(self.check_system)
@@ -2997,10 +3216,16 @@ class MainWindow(QtWidgets.QWidget):
         # keep a reference so we can enable/disable it during install
         self.runtimes_btn = runtimes_btn
 
+        defender_btn = QtWidgets.QPushButton(translator.t('buttons.defender_rules'))
+        defender_btn.setFixedWidth(160)
+        defender_btn.clicked.connect(self.create_defender_rules)
+        self.defender_btn = defender_btn
+
         btn_row = QtWidgets.QHBoxLayout()
         btn_row.setSpacing(8)
         btn_row.addWidget(recheck)
         btn_row.addWidget(runtimes_btn)
+        btn_row.addWidget(defender_btn)
         btn_row.addStretch()
         layout.addLayout(btn_row)
 
@@ -3087,17 +3312,34 @@ class MainWindow(QtWidgets.QWidget):
         left = QtWidgets.QVBoxLayout()
         right = QtWidgets.QVBoxLayout()
 
-        # Version selection dropdown
+        # Version selection dropdown (or maintenance message if versions unavailable)
         version_layout = QtWidgets.QHBoxLayout()
         version_label = QtWidgets.QLabel(translator.t('labels.select_version'))
-        self.version_combo = QtWidgets.QComboBox()
-        for display_name, version, url in self.version_options:
-            self.version_combo.addItem(display_name, userData=(version, url))
-        self.version_combo.setMinimumWidth(200)
-        version_layout.addWidget(version_label)
-        version_layout.addWidget(self.version_combo)
-        version_layout.addStretch()
-        right.addLayout(version_layout)
+
+        if not getattr(self, 'version_options', None):
+            # Show maintenance message instead of combo when no versions available
+            maint_msg = translator.t('messages.download.maintenance')
+            self.version_combo = None
+            self.version_maintenance = QtWidgets.QLabel(maint_msg)
+            self.version_maintenance.setWordWrap(True)
+            self.version_maintenance.setStyleSheet('color: #b94a48;')
+            self.version_maintenance.setMinimumWidth(200)
+            version_layout.addWidget(version_label)
+            version_layout.addWidget(self.version_maintenance)
+            version_layout.addStretch()
+            right.addLayout(version_layout)
+            # Disable download/install actions to prevent attempts
+            # Buttons are created later; mark flags to disable after creation
+            self._disable_actions_due_to_maintenance = True
+        else:
+            self.version_combo = QtWidgets.QComboBox()
+            for display_name, version, url in self.version_options:
+                self.version_combo.addItem(display_name, userData=(version, url))
+            self.version_combo.setMinimumWidth(200)
+            version_layout.addWidget(version_label)
+            version_layout.addWidget(self.version_combo)
+            version_layout.addStretch()
+            right.addLayout(version_layout)
 
         # Toggle auto install
         h = QtWidgets.QHBoxLayout()
@@ -3192,6 +3434,23 @@ class MainWindow(QtWidgets.QWidget):
             grid.addWidget(b, i//3, i%3)
 
         right.addLayout(grid)
+
+        # If maintenance mode due to missing versions, disable action buttons
+        try:
+            if getattr(self, '_disable_actions_due_to_maintenance', False):
+                if hasattr(self, 'download_button') and self.download_button is not None:
+                    self.download_button.setEnabled(False)
+                    self.download_button.setToolTip(translator.t('messages.download.maintenance_tooltip'))
+                if hasattr(self, 'install_button') and self.install_button is not None:
+                    self.install_button.setEnabled(False)
+                    self.install_button.setToolTip(translator.t('messages.download.maintenance_tooltip'))
+                # Also hide banner download action
+                try:
+                    self.install_banner_download.setEnabled(False)
+                except Exception:
+                    pass
+        except Exception:
+            pass
 
         # Pause and Cancel buttons (hidden by default)
         buttons_row = QtWidgets.QHBoxLayout()
@@ -3486,14 +3745,17 @@ class MainWindow(QtWidgets.QWidget):
                 if found_index >= 0:
                     self.version_combo.setCurrentIndex(found_index)
                 else:
-                    # If not present, add it as a temporary entry (use archive.org fallback URL)
+                    # If not present, try to add it as a temporary entry using the
+                    # configured `version_options` (do NOT fall back to hard-coded archive.org URL).
                     url = None
                     for display_name, version, vurl in getattr(self, 'version_options', []):
-                        if version == latest:
+                        if version == latest or display_name == latest:
                             url = vurl
                             break
                     if not url:
-                        url = f"https://archive.org/download/psa-diag.fr/Diagbox_Install_{latest}.7z"
+                        QtWidgets.QMessageBox.warning(self, translator.t('messages.download.title'),
+                                                      translator.t('messages.download.no_url', version=latest))
+                        return
                     self.version_combo.addItem(latest, userData=(latest, url))
                     self.version_combo.setCurrentIndex(self.version_combo.count() - 1)
 

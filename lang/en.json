@@ -25,7 +25,8 @@
     "close": "X",
     "open_log": "Open Logs",
     "dismiss": "Dismiss",
-    "install_runtimes": "Install runtimes"
+    "install_runtimes": "Install runtimes",
+    "defender_rules": "Defender Rules"
   },
   "labels": {
     "installed_version": "Installed Version : {version}",
@@ -58,11 +59,14 @@
     "download": {
       "title": "Download",
       "already_downloaded": "Diagbox {version} already downloaded.",
+      "no_url": "No download URL found for version {version}. Please add it to version options.",
       "success": "Diagbox {version} downloaded successfully.",
       "failed": "Download Diagbox {version} failed: {error}",
       "cancelled": "Download Diagbox {version} cancelled",
       "complete": "100.0% - Download Complete",
-      "failed_format": "0.0% - Download Failed"
+      "failed_format": "0.0% - Download Failed",
+      "maintenance": "Download diagbox is currently unavailable (maintenance).",
+      "maintenance_tooltip": "Maintenance. Try again later."
     },
     "install": {
       "title": "Install",
@@ -90,6 +94,7 @@
         "diagbox": "Diagbox Installation",
         "runtimes": "Runtimes Installation",
         "driver": "Driver Installation",
+          "defender": "Create Defender rules",
         "ok": "OK",
         "error": "Error: {msg}",
         "not_run": "Not run"
@@ -112,6 +117,13 @@
       "warning": "VCI Driver installation returned code: {code}\n\nThe driver may already be installed or require a reboot.",
       "already_present": "VCI Driver already installed (files present).",
       "error": "Failed to install VCI Driver:\n\n{error}"
+    },
+    "defender": {
+      "title": "Windows Defender Rules",
+      "success": "{count} exclusion(s) added successfully.",
+      "no_changes": "All exclusions already exist. No changes needed.",
+      "failed": "Failed to add some exclusions: {paths}",
+      "error": "PowerShell error: {error}"
     },
     "launch": {
       "title": "Launch Diagbox",
