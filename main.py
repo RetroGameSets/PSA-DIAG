@@ -26,7 +26,7 @@ else:
     BASE = Path(__file__).resolve().parent
 
 # Centralized configuration (moved to `config.py`)
-from config import CONFIG_DIR, APP_VERSION, URL_LAST_VERSION_PSADIAG, URL_LAST_VERSION_DIAGBOX, URL_VERSION_OPTIONS, URL_REMOTE_MESSAGES
+from config import CONFIG_DIR, APP_VERSION, URL_LAST_VERSION_PSADIAG, URL_LAST_VERSION_DIAGBOX, URL_VERSION_OPTIONS, URL_REMOTE_MESSAGES, ARCHIVE_PASSWORD
 
 # Translation system
 class Translator:
@@ -416,8 +416,13 @@ class InstallThread(QtCore.QThread):
                 tried.append(exe)
                 logger.info(f"Attempting extraction with: {exe}")
                 try:
+                    # Build command with optional password
+                    cmd = [exe, "x", self.path, "-oC:\\", "-y", "-bsp1"]
+                    if ARCHIVE_PASSWORD:
+                        cmd.append(f"-p{ARCHIVE_PASSWORD}")
+                    
                     self.process = subprocess.Popen(
-                        [exe, "x", self.path, "-oC:\\", "-y", "-bsp1"],
+                        cmd,
                         stdout=subprocess.PIPE,
                         stderr=subprocess.PIPE,
                         text=True,
@@ -1471,17 +1476,26 @@ class MainWindow(QtWidgets.QWidget):
         downloaded_versions = []
         if os.path.exists(self.download_folder):
             for file in os.listdir(self.download_folder):
-                if file.startswith("Diagbox_Install_") and file.endswith(".7z"):
-                    # Extract version from filename
-                    version = file.replace("Diagbox_Install_", "").replace(".7z", "")
-                    file_path = os.path.join(self.download_folder, file)
-                    file_size = os.path.getsize(file_path)
-                    downloaded_versions.append({
-                        'version': version,
-                        'path': file_path,
-                        'size': file_size,
-                        'size_mb': file_size / (1024 * 1024)
-                    })
+                if file.endswith(".7z"):
+                    version = None
+                    # Support both naming formats:
+                    # 1. "Diagbox_Install_09.180.7z" (old format)
+                    # 2. "09.180.7z" (new format)
+                    if file.startswith("Diagbox_Install_"):
+                        version = file.replace("Diagbox_Install_", "").replace(".7z", "")
+                    else:
+                        # Assume filename is just version.7z
+                        version = file.replace(".7z", "")
+                    
+                    if version:
+                        file_path = os.path.join(self.download_folder, file)
+                        file_size = os.path.getsize(file_path)
+                        downloaded_versions.append({
+                            'version': version,
+                            'path': file_path,
+                            'size': file_size,
+                            'size_mb': file_size / (1024 * 1024)
+                        })
         return downloaded_versions
 
     def set_buttons_enabled(self, enabled):
@@ -1799,7 +1813,13 @@ class MainWindow(QtWidgets.QWidget):
             if selected_data:
                 version, url = selected_data
                 self.last_version_diagbox = version
-                self.diagbox_path = os.path.join(self.download_folder, f"Diagbox_Install_{version}.7z")
+                # Try new format first (09.180.7z), then old format (Diagbox_Install_09.180.7z)
+                new_format = os.path.join(self.download_folder, f"{version}.7z")
+                old_format = os.path.join(self.download_folder, f"Diagbox_Install_{version}.7z")
+                if os.path.exists(new_format):
+                    self.diagbox_path = new_format
+                else:
+                    self.diagbox_path = old_format
                 logger.info(f"Installing version: {version}, path: {self.diagbox_path}")
         
         if not os.path.exists(self.diagbox_path):
@@ -2273,7 +2293,13 @@ class MainWindow(QtWidgets.QWidget):
             data = response.json()
             self.last_version_diagbox = data.get('version', '')
             logger.info(f"Last Diagbox version: {self.last_version_diagbox}")
-            self.diagbox_path = os.path.join(self.download_folder, f"Diagbox_Install_{self.last_version_diagbox}.7z")
+            # Try new format first, then old format
+            new_format = os.path.join(self.download_folder, f"{self.last_version_diagbox}.7z")
+            old_format = os.path.join(self.download_folder, f"Diagbox_Install_{self.last_version_diagbox}.7z")
+            if os.path.exists(new_format):
+                self.diagbox_path = new_format
+            else:
+                self.diagbox_path = old_format
         except Exception as e:
             logger.error(f"Failed to fetch last version: {e}", exc_info=True)
             QtWidgets.QMessageBox.warning(self, "Error", f"Failed to fetch last version: {e}")
@@ -2495,7 +2521,8 @@ class MainWindow(QtWidgets.QWidget):
                 return
             url = f"https://archive.org/download/psa-diag.fr/Diagbox_Install_{self.last_version_diagbox}.7z"
         
-        self.diagbox_path = os.path.join(self.download_folder, f"Diagbox_Install_{self.last_version_diagbox}.7z")
+        # Set path to new format (downloaded files will use new naming)
+        self.diagbox_path = os.path.join(self.download_folder, f"{self.last_version_diagbox}.7z")
         
         if not os.path.exists(self.download_folder):
             os.makedirs(self.download_folder)

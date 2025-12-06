@@ -14,7 +14,7 @@
     "clean": "Clean Diagbox",
     "install_vci": "Install VCI Driver",
     "launch": "Launch Diagbox",
-    "kill_process": "Kill/Close Process",
+    "kill_process": "Quit/Close Process",
     "pause": "Pause",
     "resume": "Resume",
     "cancel": "Cancel Download",

@@ -14,7 +14,7 @@
     "clean": "Nettoyer Diagbox",
     "install_vci": "Installer VCI Driver",
     "launch": "Lancer Diagbox",
-    "kill_process": "Tuer/Fermer Processus",
+    "kill_process": "Quitter/Fermer Processus",
     "pause": "Pause",
     "resume": "Reprendre",
     "cancel": "Annuler le téléchargement",
@@ -119,10 +119,10 @@
       "error": "Échec du lancement de Diagbox :\n\n{error}"
     },
     "kill_process": {
-      "title": "Tuer/Fermer Processus",
+      "title": "Quiter/Fermer Processus",
       "success": "Tué avec succès {count} processus.",
       "none": "Aucun processus Diagbox en cours d'exécution.",
-      "error": "Erreur lors de la tentative de tuer les processus :\n\n{error}"
+      "error": "Erreur lors de la tentative de quitter les processus :\n\n{error}"
     },
     "language": {
       "title": "Changer de Langue",
