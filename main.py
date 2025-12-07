@@ -1740,9 +1740,9 @@ class MainWindow(QtWidgets.QWidget):
         if hasattr(self, 'footer_progress'):
             self.footer_progress.setRange(0, 100)
             self.footer_progress.setValue(value)
-            self.footer_progress.setFormat(f"Extracting... {value}%")
+            self.footer_progress.setFormat(f"Extraction... {value}%")
         if hasattr(self, 'footer_label'):
-            self.footer_label.setText("Installing Diagbox...")
+            self.footer_label.setText("InstallDiagbox...")
         
         QtWidgets.QApplication.processEvents()
     
@@ -1751,7 +1751,7 @@ class MainWindow(QtWidgets.QWidget):
         # Update footer label with truncated filename
         if hasattr(self, 'footer_label'):
             display_name = filename if len(filename) <= 60 else "..." + filename[-57:]
-            self.footer_label.setText(f"Installing: {display_name}")
+            self.footer_label.setText(f"Install: {display_name}")
         
         QtWidgets.QApplication.processEvents()
 
@@ -3735,7 +3735,22 @@ if __name__ == "__main__":
             # If elevation failed, continue anyway (user might have cancelled)
             logger.warning("Continuing without admin privileges (some features may not work)")
     
+    # Set AppUserModelID for Windows taskbar icon
+    if sys.platform == 'win32':
+        try:
+            myappid = 'PSA_DIAG'
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
+            logger.info(f"AppUserModelID set to: {myappid}")
+        except Exception as e:
+            logger.warning(f"Failed to set AppUserModelID: {e}")
+    
     app = QtWidgets.QApplication([])
+    
+    # Set application icon
+    icon_path = BASE / "icons" / "icon.ico"
+    if icon_path.exists():
+        app.setWindowIcon(QtGui.QIcon(str(icon_path)))
+    
     win = MainWindow()
     win.show()
     sys.exit(app.exec())
