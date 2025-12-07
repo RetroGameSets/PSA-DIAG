@@ -292,7 +292,7 @@ class DownloadThread(QtCore.QThread):
 
     def run(self):
         try:
-            logger.info(f"Starting download: {self.url}")
+            logger.info(f"Starting download")
             response = requests.get(self.url, stream=True, timeout=30)
             
             # Check for HTTP errors with user-friendly messages
@@ -1861,6 +1861,8 @@ class MainWindow(QtWidgets.QWidget):
         # If a Diagbox version is already installed, require cleaning first
         installed_version = self.check_installed_version()
         if installed_version:
+            
+            logger.warning(f"Diagbox is already installed, need to clean before continue")
             reply = QtWidgets.QMessageBox.question(
                 self,
                 translator.t('messages.install.title'),
@@ -2735,7 +2737,45 @@ class MainWindow(QtWidgets.QWidget):
         vbox.addStretch()
         vbox.addWidget(btn_info)
 
-        # Display app version under Info button in the sidebar
+        # Logo in sidebar bottom (clickable link to website)
+        logo = QtWidgets.QLabel()
+        logo.setOpenExternalLinks(True)
+        logo.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
+        pix = QtGui.QPixmap(str(BASE / "icons" / "logo.png"))
+        if not pix.isNull():
+            pix = pix.scaledToWidth(80, QtCore.Qt.TransformationMode.SmoothTransformation)
+            logo.setPixmap(pix)
+            logo.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        # Make logo clickable
+        logo.mousePressEvent = lambda event: QtGui.QDesktopServices.openUrl(QtCore.QUrl("https://www.psa-diag.fr/"))
+        vbox.addWidget(logo)
+
+        # Donate button under logo
+        donate_btn = QtWidgets.QPushButton("♥ Donate")
+        donate_btn.setFixedHeight(32)
+        donate_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #2a2a2a;
+                color: #4fc3f7;
+                border: 1px solid #4fc3f7;
+                border-radius: 4px;
+                font-size: 11px;
+                font-weight: bold;
+                padding: 4px;
+            }
+            QPushButton:hover {
+                background-color: #4fc3f7;
+                color: #1e1e1e;
+            }
+            QPushButton:pressed {
+                background-color: #0288d1;
+            }
+        """)
+        donate_btn.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
+        donate_btn.clicked.connect(lambda: QtGui.QDesktopServices.openUrl(QtCore.QUrl("https://buymeacoffee.com/PsaDiagOfficial")))
+        vbox.addWidget(donate_btn)
+
+        # Display app version under logo in the sidebar
         self.sidebar_version_label = QtWidgets.QLabel(translator.t('labels.version', version=APP_VERSION))
         self.sidebar_version_label.setObjectName("sidebarVersion")
         self.sidebar_version_label.setStyleSheet("font-size:11px; color: #b0b0b0;")
@@ -2816,6 +2856,13 @@ class MainWindow(QtWidgets.QWidget):
         self.log_widget.setObjectName("logWidget")
         self.log_widget.setReadOnly(True)
         log_sidebar_layout.addWidget(self.log_widget)
+        
+        # Open logs button at bottom of log sidebar
+        self.open_log_btn = QtWidgets.QPushButton(translator.t('buttons.open_log'))
+        self.open_log_btn.setFixedHeight(32)
+        self.open_log_btn.setStyleSheet("font-size: 10px;")
+        self.open_log_btn.clicked.connect(self.open_logs)
+        log_sidebar_layout.addWidget(self.open_log_btn)
         
         # Add logging handler
         self.log_handler = QTextEditLogger(self.log_widget)
@@ -3493,35 +3540,9 @@ class MainWindow(QtWidgets.QWidget):
         w = QtWidgets.QWidget()
         layout = QtWidgets.QVBoxLayout(w)
         layout.setSpacing(10)
+        layout.setContentsMargins(10, 10, 10, 10)
         
-        # Top section with logo/version (left) and changelog (right)
-        top_section = QtWidgets.QWidget()
-        top_layout = QtWidgets.QHBoxLayout(top_section)
-        top_layout.setContentsMargins(0, 0, 0, 0)
-        top_layout.setSpacing(10)
-        
-        # Left: Logo and version
-        left_section = QtWidgets.QWidget()
-        left_layout = QtWidgets.QVBoxLayout(left_section)
-        left_layout.setContentsMargins(0, 0, 0, 0)
-        
-        logo = QtWidgets.QLabel()
-        pix = QtGui.QPixmap(str(BASE / "icons" / "logo.png"))
-        if not pix.isNull():
-            pix = pix.scaledToWidth(160, QtCore.Qt.TransformationMode.SmoothTransformation)
-            logo.setPixmap(pix)
-        else:
-            logo.setText("Logo non disponible")
-        left_layout.addWidget(logo)
-        
-        version_label = QtWidgets.QLabel(translator.t('labels.version', version=APP_VERSION))
-        version_label.setStyleSheet("font-size: 14px;")
-        left_layout.addWidget(version_label)
-        left_layout.addStretch()
-        
-        top_layout.addWidget(left_section)
-        
-        # Right: Changelog frame
+        # Changelog frame (full width)
         changelog_frame = QtWidgets.QFrame()
         changelog_frame.setObjectName("changelogFrame")
         changelog_frame.setStyleSheet("""
@@ -3532,8 +3553,6 @@ class MainWindow(QtWidgets.QWidget):
                 padding: 10px;
             }
         """)
-        changelog_frame.setMinimumWidth(300)
-        changelog_frame.setMaximumWidth(400)
         changelog_layout = QtWidgets.QVBoxLayout(changelog_frame)
         changelog_layout.setContentsMargins(10, 10, 10, 10)
         changelog_layout.setSpacing(8)
@@ -3556,67 +3575,91 @@ class MainWindow(QtWidgets.QWidget):
             }
         """)
         self.changelog_text.setPlainText("Loading changelog...")
-        self.changelog_text.setMinimumHeight(150)
         changelog_layout.addWidget(self.changelog_text)
         
-        top_layout.addWidget(changelog_frame)
-        
-        layout.addWidget(top_section)
+        layout.addWidget(changelog_frame)
         
         # Load changelog asynchronously
         QtCore.QTimer.singleShot(500, self.load_changelog)
         
-        # Open logs folder button
-        self.open_log_btn = QtWidgets.QPushButton(translator.t('buttons.open_log'))
-        self.open_log_btn.setObjectName("actionButton")
-        self.open_log_btn.setFixedHeight(44)
-        self.open_log_btn.clicked.connect(self.open_logs)
-        layout.addWidget(self.open_log_btn)
-        
-        layout.addStretch()
         return w
     
     def load_changelog(self):
-        """Load changelog from GitHub release for current app version"""
+        """Load changelog from the last 10 GitHub releases"""
         try:
-            # Build GitHub API URL for the release matching current version
-            version_tag = f"v{APP_VERSION}"
-            api_url = f"https://api.github.com/repos/RetroGameSets/PSA-DIAG/releases/tags/{version_tag}"
+            # Get the latest 10 releases
+            api_url = "https://api.github.com/repos/RetroGameSets/PSA-DIAG/releases?per_page=10"
             
-            logger.info(f"[STEP 3] -- Fetching changelog")
+            logger.info(f"[STEP 3] -- Fetching changelog for last 10 releases")
             response = requests.get(api_url, timeout=5)
             
             if response.status_code == 200:
-                data = response.json()
-                body = data.get('body', '')
+                releases = response.json()
                 
-                if body:
-                    # Extract the changelog from the body
-                    # The body format from build.yml is:
-                    # ## PSA-DIAG x.x.x.x
-                    # ### Installation
-                    # ...
-                    # ### Changes
-                    # - commit message
+                if not releases:
+                    self.changelog_text.setPlainText("No releases found.")
+                    return
+                
+                changelog_parts = []
+                
+                for release in releases:
+                    tag = release.get('tag_name', 'Unknown')
+                    name = release.get('name', tag)
+                    body = release.get('body', '')
+                    published = release.get('published_at', '')
                     
-                    # Try to extract just the Changes section
-                    if '### Changes' in body:
-                        changes_section = body.split('### Changes', 1)[1].strip()
-                        # Remove any trailing markdown sections
-                        if '###' in changes_section:
-                            changes_section = changes_section.split('###', 1)[0].strip()
-                        changelog_content = changes_section
+                    # Format published date
+                    date_str = ''
+                    if published:
+                        try:
+                            from datetime import datetime
+                            dt = datetime.fromisoformat(published.replace('Z', '+00:00'))
+                            date_str = dt.strftime('%Y-%m-%d')
+                        except:
+                            date_str = published.split('T')[0]
+                    
+                    # Add version header
+                    header = f"{'='*50}\n"
+                    if date_str:
+                        header += f"📦 {name} ({date_str})\n"
                     else:
-                        # Fallback: use entire body
-                        changelog_content = body
+                        header += f"📦 {name}\n"
+                    header += f"{'='*50}\n"
                     
-                    self.changelog_text.setPlainText(changelog_content)
-                    logger.info("Changelog loaded successfully")
-                else:
-                    self.changelog_text.setPlainText("No changelog available for this version.")
+                    changelog_parts.append(header)
+                    
+                    if body:
+                        # Extract the Changes section if present
+                        if '### Changes' in body:
+                            changes_section = body.split('### Changes', 1)[1].strip()
+                            # Remove any trailing markdown sections
+                            if '###' in changes_section:
+                                changes_section = changes_section.split('###', 1)[0].strip()
+                            changelog_parts.append(changes_section + "\n")
+                        else:
+                            # Use entire body, but skip Installation section if present
+                            if '### Installation' in body:
+                                # Try to get everything after Installation section
+                                parts = body.split('### Installation', 1)
+                                if len(parts) > 1 and '###' in parts[1]:
+                                    remaining = parts[1].split('###', 1)[1]
+                                    changelog_parts.append(remaining.strip() + "\n")
+                                else:
+                                    changelog_parts.append(body.strip() + "\n")
+                            else:
+                                changelog_parts.append(body.strip() + "\n")
+                    else:
+                        changelog_parts.append("No changelog available.\n")
+                    
+                    changelog_parts.append("\n")
+                
+                full_changelog = "\n".join(changelog_parts)
+                self.changelog_text.setPlainText(full_changelog)
+                logger.info(f"Changelog loaded successfully ({len(releases)} releases)")
+                
             elif response.status_code == 404:
-                self.changelog_text.setPlainText(f"Release {version_tag} not found on GitHub.\n\nThis may be a development version.")
-                logger.warning(f"Release {version_tag} not found (404)")
+                self.changelog_text.setPlainText("Releases not found on GitHub.\n\nThis repository may not have any releases yet.")
+                logger.warning("Releases not found (404)")
             else:
                 self.changelog_text.setPlainText(f"Failed to load changelog (HTTP {response.status_code})")
                 logger.warning(f"Failed to fetch changelog: HTTP {response.status_code}")
