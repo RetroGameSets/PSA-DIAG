@@ -2,6 +2,10 @@
   "app": {
     "title": "PSA-DIAG FREE"
   },
+  "titles": {
+    "diagbox_native_install": "Diagbox Native Install",
+    "diagbox_vhdx_install": "Diagbox VHDX Install"
+  },
   "menu": {
     "config": "Configuration",
     "install": "Installation",
@@ -181,6 +185,28 @@
       "continue": "Do you want to continue anyway?"
     },
     "page_update": "Update / Refresh (Not available)"
+  },
+  "vhd": {
+    "download": {
+      "title": "VHDX Download",
+      "success": "Download successful",
+      "failed": "Download failed",
+      "in_progress": "VHDX download in progress...",
+      "speed": "VHDX download - {speed} MB/s"
+    },
+    "install": {
+      "title": "VHDX Installation",
+      "success": "Installation successful",
+      "failed": "Installation failed",
+      "in_progress": "Installation in progress...",
+      "complete": "Installation complete"
+    },
+    "labels": {
+      "download_size": "DOWNLOAD SIZE",
+      "download_size_with_space": "Download Size: {size} GB\nSpace required to download and install: 50 GB",
+      "download_size_default": "DOWNLOAD SIZE\nSpace required to download and install: 50 GB",
+      "destination_disk": "Destination Disk:"
+    }
   },
   "languages": {
     "en_GB": "English",

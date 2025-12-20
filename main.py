@@ -26,7 +26,7 @@ else:
     BASE = Path(__file__).resolve().parent
 
 # Centralized configuration (moved to `config.py`)
-from config import CONFIG_DIR, APP_VERSION, URL_LAST_VERSION_PSADIAG, URL_LAST_VERSION_DIAGBOX, URL_VERSION_OPTIONS, URL_REMOTE_MESSAGES, ARCHIVE_PASSWORD
+from config import CONFIG_DIR, APP_VERSION, URL_LAST_VERSION_PSADIAG, URL_LAST_VERSION_DIAGBOX, URL_VERSION_OPTIONS, URL_REMOTE_MESSAGES, ARCHIVE_PASSWORD, URL_VHD_DOWNLOAD
 
 # Translation system
 class Translator:
@@ -236,10 +236,24 @@ class SidebarButton(QtWidgets.QPushButton):
         self.setMinimumWidth(60)
         self.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
         if icon_path and icon_path.exists():
-            # Load original pixmap
-            orig_pix = QtGui.QPixmap(str(icon_path))
-            # Create a white-tinted pixmap for the unchecked (Off) state
+            # Define icon size
+            icon_size = QtCore.QSize(48, 48)
+            
+            # Render SVG at target size for crisp display
             try:
+                from PySide6.QtSvg import QSvgRenderer
+                
+                # Render original (colored) SVG
+                renderer = QSvgRenderer(str(icon_path))
+                orig_pix = QtGui.QPixmap(icon_size)
+                orig_pix.fill(QtCore.Qt.transparent)
+                painter = QtGui.QPainter(orig_pix)
+                painter.setRenderHint(QtGui.QPainter.Antialiasing)
+                painter.setRenderHint(QtGui.QPainter.SmoothPixmapTransform)
+                renderer.render(painter)
+                painter.end()
+                
+                # Create white-tinted version for unchecked state
                 white_pix = QtGui.QPixmap(orig_pix.size())
                 white_pix.fill(QtCore.Qt.transparent)
                 p = QtGui.QPainter(white_pix)
@@ -248,9 +262,20 @@ class SidebarButton(QtWidgets.QPushButton):
                 p.setCompositionMode(QtGui.QPainter.CompositionMode_SourceIn)
                 p.fillRect(white_pix.rect(), QtGui.QColor('white'))
                 p.end()
+                
             except Exception:
-                # Fallback: use original if tinting fails
-                white_pix = orig_pix
+                # Fallback: load as regular pixmap and scale
+                orig_pix = QtGui.QPixmap(str(icon_path))
+                orig_pix = orig_pix.scaled(icon_size, QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation)
+                
+                white_pix = QtGui.QPixmap(orig_pix.size())
+                white_pix.fill(QtCore.Qt.transparent)
+                p = QtGui.QPainter(white_pix)
+                p.setRenderHints(QtGui.QPainter.Antialiasing | QtGui.QPainter.SmoothPixmapTransform)
+                p.drawPixmap(0, 0, orig_pix)
+                p.setCompositionMode(QtGui.QPainter.CompositionMode_SourceIn)
+                p.fillRect(white_pix.rect(), QtGui.QColor('white'))
+                p.end()
 
             icon = QtGui.QIcon()
             # Off = not checked -> white icon
@@ -258,7 +283,7 @@ class SidebarButton(QtWidgets.QPushButton):
             # On = checked -> original (colored) icon
             icon.addPixmap(orig_pix, QtGui.QIcon.Normal, QtGui.QIcon.On)
             self.setIcon(icon)
-            self.setIconSize(QtCore.QSize(28, 28))
+            self.setIconSize(icon_size)
         # Center the icon by removing text and ensuring proper alignment
         self.setText("")
 
@@ -390,6 +415,269 @@ class DownloadThread(QtCore.QThread):
             logger.error(f"Download exception: {e}", exc_info=True)
             error_msg = translator.t('messages.download.error_generic', code=str(e))
             self.finished.emit(False, error_msg)
+
+class VHDXDownloadThread(QtCore.QThread):
+    """Thread for downloading VHDX files"""
+    finished = QtCore.Signal(bool, str)  # success, message
+    progress = QtCore.Signal(int, float, str)  # progress (0-1000), speed (MB/s), ETA
+    
+    def __init__(self, url, destination_folder, destination_drive):
+        super().__init__()
+        self.url = url
+        self.destination_folder = destination_folder
+        self.destination_drive = destination_drive
+        self._is_cancelled = False
+        self._is_paused = False
+        
+    def cancel(self):
+        """Cancel the download"""
+        self._is_cancelled = True
+        
+    def pause(self):
+        """Pause the download"""
+        self._is_paused = True
+        
+    def resume(self):
+        """Resume the download"""
+        self._is_paused = False
+    
+    def run(self):
+        try:
+            # Create VHD folder at root of selected drive
+            vhd_folder = os.path.join(f"{self.destination_drive}:\\", "VHD")
+            os.makedirs(vhd_folder, exist_ok=True)
+            logger.info(f"VHD folder created/verified: {vhd_folder}")
+            
+            # Extract filename from URL or use default
+            filename = os.path.basename(self.url) if self.url else "PSA-DIAG-Dynamic.vhdx"
+            if not filename or '.' not in filename:
+                filename = "PSA-DIAG-Dynamic.vhdx"
+            
+            file_path = os.path.join(vhd_folder, filename)
+            logger.info(f"Starting VHDX download to: {file_path}")
+            logger.info(f"Download URL: {self.url}")
+            
+            # Start download with streaming
+            response = requests.get(self.url, stream=True, timeout=30)
+            
+            # Check for HTTP errors
+            if response.status_code != 200:
+                logger.error(f"Download failed with HTTP {response.status_code}")
+                self.finished.emit(False, f"Erreur HTTP {response.status_code}")
+                return
+            
+            response.raise_for_status()
+            
+            # Get content length
+            total_size = 0
+            content_length = response.headers.get('content-length')
+            if content_length:
+                total_size = int(content_length)
+                logger.info(f"VHDX size: {total_size / (1024**3):.2f} GB")
+            
+            downloaded = 0
+            chunk_count = 0
+            start_time = time.time()
+            
+            with open(file_path, 'wb') as f:
+                for chunk in response.iter_content(chunk_size=8192):
+                    # Check if paused
+                    while self._is_paused and not self._is_cancelled:
+                        time.sleep(0.1)
+                    
+                    if self._is_cancelled:
+                        f.close()
+                        if os.path.exists(file_path):
+                            os.remove(file_path)
+                        logger.warning("VHDX download cancelled")
+                        self.finished.emit(False, "Téléchargement annulé")
+                        return
+                    
+                    if chunk:
+                        f.write(chunk)
+                        downloaded += len(chunk)
+                        chunk_count += 1
+                        
+                        if chunk_count % 100 == 0:
+                            f.flush()
+                            elapsed = time.time() - start_time
+                            speed = downloaded / elapsed / (1024 * 1024) if elapsed > 0 else 0
+                            
+                            if total_size > 0:
+                                progress = int((downloaded / total_size) * 1000)
+                                remaining = total_size - downloaded
+                                eta_seconds = remaining / (speed * 1024 * 1024) if speed > 0 else 0
+                                eta_str = f"{int(eta_seconds // 60):02d}:{int(eta_seconds % 60):02d}"
+                            else:
+                                progress = 0
+                                eta_str = f"{downloaded / (1024**3):.2f} GB"
+                            
+                            self.progress.emit(progress, speed, eta_str)
+            
+            # Download complete
+            if total_size == 0 or downloaded >= total_size:
+                self.progress.emit(1000, 0, "00:00")
+            
+            if os.path.exists(file_path):
+                logger.info(f"VHDX download completed: {file_path}")
+                self.finished.emit(True, f"Téléchargement terminé: {filename}")
+            else:
+                logger.error("Download failed: File not found after download")
+                self.finished.emit(False, "Échec du téléchargement")
+                
+        except requests.exceptions.Timeout:
+            logger.error("VHDX download timeout")
+            self.finished.emit(False, "Timeout de téléchargement")
+        except requests.exceptions.ConnectionError:
+            logger.error("VHDX download connection error")
+            self.finished.emit(False, "Erreur de connexion")
+        except Exception as e:
+            logger.error(f"VHDX download exception: {e}", exc_info=True)
+            self.finished.emit(False, f"Erreur: {str(e)}")
+
+
+class VHDXInstallThread(QtCore.QThread):
+    """Thread for installing VHDX with BCD configuration"""
+    finished = QtCore.Signal(bool, str)  # success, message
+    
+    def __init__(self, vhdx_path, description="PSA-DIAG"):
+        super().__init__()
+        self.vhdx_path = vhdx_path
+        self.description = description
+    
+    def run(self):
+        try:
+            logger.info(f"Starting VHDX installation: {self.vhdx_path}")
+            logger.info(f"Boot description: {self.description}")
+            
+            # Verify VHDX file exists
+            if not os.path.exists(self.vhdx_path):
+                error_msg = f"VHDX file not found: {self.vhdx_path}"
+                logger.error(error_msg)
+                self.finished.emit(False, error_msg)
+                return
+            
+            # Extract relative path for BCD format
+            # BCD expects: vhd=[locate]path format, e.g., vhd=[locate]\VHD\PSA-DIAG.vhdx
+            vhd_path_relative = os.path.splitdrive(self.vhdx_path)[1]  # e.g., "\VHD\PSA-DIAG.vhdx"
+            vhd_bcd_format = f"[locate]{vhd_path_relative}"
+            
+            logger.info(f"BCD VHD format: vhd={vhd_bcd_format}")
+            
+            # PowerShell script to configure BCD
+            ps_script = f"""
+$VHD = '{vhd_bcd_format}'
+$description = '{self.description}'
+
+try {{
+    # Check if an entry with this description already exists
+    $existingEntries = bcdedit /enum | Select-String -Pattern "description\\s+$description"
+    
+    if ($existingEntries) {{
+        Write-Host "Boot entry '$description' already exists."
+        
+        # Extract CLSID from the existing entry
+        $beforeDescription = bcdedit /enum | Select-String -Pattern "identificateur" -Context 0,10 | Where-Object {{
+            $_.Context.PostContext -match "description\\s+$description"
+        }}
+        
+        if ($beforeDescription -match '{{([a-fA-F0-9-]+)}}') {{
+            $existingCLSID = "{{$($matches[1])}}"
+            Write-Host "Existing CLSID found: $existingCLSID"
+            Write-Host "Deleting old entry..."
+            bcdedit /delete $existingCLSID /f
+            if ($LASTEXITCODE -ne 0) {{
+                throw "Failed to delete existing entry (exit code: $LASTEXITCODE)"
+            }}
+            Write-Host "Old entry deleted successfully"
+        }}
+    }}
+    
+    # Copy current boot entry
+    $BootEntryCopy = bcdedit /copy '{{current}}' /d $description
+    if ($LASTEXITCODE -ne 0) {{
+        throw "Failed to copy boot entry (exit code: $LASTEXITCODE)"
+    }}
+    
+    # Extract CLSID from output using regex
+    if ($BootEntryCopy -match '{{([a-fA-F0-9-]+)}}') {{
+        $CLSID = "{{$($matches[1])}}"
+    }} else {{
+        throw "Failed to extract CLSID from bcdedit output"
+    }}
+    
+    Write-Host "Boot entry created: $CLSID"
+    
+    # Set device to VHD
+    $result1 = bcdedit /set $CLSID device vhd=$VHD
+    if ($LASTEXITCODE -ne 0) {{
+        throw "Failed to set device (exit code: $LASTEXITCODE)"
+    }}
+    
+    # Set osdevice to VHD
+    $result2 = bcdedit /set $CLSID osdevice vhd=$VHD
+    if ($LASTEXITCODE -ne 0) {{
+        throw "Failed to set osdevice (exit code: $LASTEXITCODE)"
+    }}
+    
+    # Set locale to fr-FR
+    $result4 = bcdedit /set $CLSID locale fr-FR
+    if ($LASTEXITCODE -ne 0) {{
+        Write-Host "Warning: Failed to set locale (exit code: $LASTEXITCODE)"
+    }}
+    
+    # Enable HAL detection
+    $result5 = bcdedit /set $CLSID detecthal on
+    if ($LASTEXITCODE -ne 0) {{
+        throw "Failed to enable detecthal (exit code: $LASTEXITCODE)"
+    }}
+    
+    Write-Host "BCD configuration completed successfully"
+    Write-Host "CLSID: $CLSID"
+    exit 0
+}} catch {{
+    Write-Error $_.Exception.Message
+    exit 1
+}}
+"""
+            
+            logger.info("Executing PowerShell BCD configuration script")
+            
+            # Execute PowerShell script
+            proc = subprocess.run(
+                ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", ps_script],
+                capture_output=True,
+                text=True,
+                creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
+            )
+            
+            stdout = (proc.stdout or '').strip()
+            stderr = (proc.stderr or '').strip()
+            
+            logger.info(f"PowerShell exit code: {proc.returncode}")
+            if stdout:
+                logger.info(f"PowerShell stdout: {stdout}")
+            if stderr:
+                logger.warning(f"PowerShell stderr: {stderr}")
+            
+            if proc.returncode == 0:
+                success_msg = (
+                    f"VHDX installation successful!\n\n"
+                    f"The system is configured to boot from:\n{self.vhdx_path}\n\n"
+                    f"Restart your computer and select '{self.description}' from the boot menu."
+                )
+                logger.info("VHDX installation completed successfully")
+                self.finished.emit(True, success_msg)
+            else:
+                error_msg = f"BCD configuration failed.\n\n{stderr if stderr else 'Unknown error'}"
+                logger.error(f"VHDX installation failed: {error_msg}")
+                self.finished.emit(False, error_msg)
+                
+        except Exception as e:
+            error_msg = f"Installation error: {str(e)}"
+            logger.error(f"VHDX installation exception: {e}", exc_info=True)
+            self.finished.emit(False, error_msg)
+
 
 class InstallThread(QtCore.QThread):
     finished = QtCore.Signal(bool, str)
@@ -966,6 +1254,8 @@ class MainWindow(QtWidgets.QWidget):
         self.install_thread = None
         self.cancel_button = None
         self.pause_button = None
+        self.vhd_pause_button = None
+        self.vhd_cancel_button = None
         self.dragPos = QtCore.QPoint()
         self.log_widget = None
         self.log_handler = None
@@ -1524,7 +1814,7 @@ class MainWindow(QtWidgets.QWidget):
             current_widget = self.stack.currentWidget()
             if current_widget:
                 for child in current_widget.findChildren(QtWidgets.QPushButton):
-                    if child != self.cancel_button and child != self.pause_button:
+                    if child != self.cancel_button and child != self.pause_button and child != self.vhd_cancel_button and child != self.vhd_pause_button:
                         child.setEnabled(enabled)
         except Exception as e:
             logger.warning(f"Failed to toggle buttons: {e}")
@@ -1564,6 +1854,35 @@ class MainWindow(QtWidgets.QWidget):
                 self.download_thread.pause()
                 if self.pause_button:
                     self.pause_button.setText(translator.t('buttons.resume'))
+
+    def cancel_vhd_download(self):
+        """Cancel the current VHD download"""
+        if hasattr(self, 'vhdx_download_thread') and self.vhdx_download_thread and self.vhdx_download_thread.isRunning():
+            self.vhdx_download_thread.cancel()
+
+    def toggle_pause_vhd_download(self):
+        """Pause or resume the VHD download"""
+        if hasattr(self, 'vhdx_download_thread') and self.vhdx_download_thread and self.vhdx_download_thread.isRunning():
+            if self.vhdx_download_thread._is_paused:
+                self.vhdx_download_thread.resume()
+                if self.vhd_pause_button:
+                    self.vhd_pause_button.setText(translator.t('buttons.pause'))
+            else:
+                self.vhdx_download_thread.pause()
+                if self.vhd_pause_button:
+                    self.vhd_pause_button.setText(translator.t('buttons.resume'))
+
+    def toggle_pause_vhd_download(self):
+        """Pause or resume the VHD download"""
+        if hasattr(self, 'vhdx_download_thread') and self.vhdx_download_thread and self.vhdx_download_thread.isRunning():
+            if self.vhdx_download_thread._is_paused:
+                self.vhdx_download_thread.resume()
+                if self.vhd_pause_button:
+                    self.vhd_pause_button.setText(translator.t('buttons.pause'))
+            else:
+                self.vhdx_download_thread.pause()
+                if self.vhd_pause_button:
+                    self.vhd_pause_button.setText(translator.t('buttons.resume'))
 
     def on_install_finished(self, success, message, install_button, bar):
         # Ensure runtimes UI state is reset (re-enable runtimes button + footer)
@@ -2725,7 +3044,7 @@ class MainWindow(QtWidgets.QWidget):
         icon_folder = BASE / "icons"
         btn_diag = SidebarButton("", icon_folder / "diag.svg")
         btn_setup = SidebarButton("", icon_folder / "setup.svg")
-        btn_update = SidebarButton("", icon_folder / "update.svg")
+        btn_vhd = SidebarButton("", icon_folder / "vhd.svg")
         btn_info = SidebarButton("", icon_folder / "info.svg")
 
         # Make first checked
@@ -2733,7 +3052,7 @@ class MainWindow(QtWidgets.QWidget):
 
         vbox.addWidget(btn_diag)
         vbox.addWidget(btn_setup)
-        vbox.addWidget(btn_update)
+        vbox.addWidget(btn_vhd)
         vbox.addStretch()
         vbox.addWidget(btn_info)
 
@@ -2807,7 +3126,7 @@ class MainWindow(QtWidgets.QWidget):
         self.stack = QtWidgets.QStackedWidget()
         self.stack.addWidget(self.page_config())
         self.stack.addWidget(self.page_install())
-        self.stack.addWidget(self.page_update())
+        self.stack.addWidget(self.page_vhd())
         self.stack.addWidget(self.page_about())
 
         content_layout.addWidget(self.stack)
@@ -2900,7 +3219,7 @@ class MainWindow(QtWidgets.QWidget):
         # Connections
         btn_diag.clicked.connect(lambda: self.switch_page(0, btn_diag))
         btn_setup.clicked.connect(lambda: self.switch_page(1, btn_setup))
-        btn_update.clicked.connect(lambda: self.switch_page(2, btn_update))
+        btn_vhd.clicked.connect(lambda: self.switch_page(2, btn_vhd))
         btn_info.clicked.connect(lambda: self.switch_page(3, btn_info))
         btn_close.clicked.connect(self.close)
         btn_min.clicked.connect(self.showMinimized)
@@ -3312,6 +3631,13 @@ class MainWindow(QtWidgets.QWidget):
         layout = QtWidgets.QVBoxLayout(w)
         layout.setSpacing(10)
 
+        # Page title
+        page_title = QtWidgets.QLabel(translator.t('titles.diagbox_native_install'))
+        page_title.setObjectName("pageTitle")
+        page_title.setStyleSheet("font-size: 18px; font-weight: bold; color: #5cb85c; padding: 10px;")
+        page_title.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(page_title)
+
         # Fetch online version if not already
         if not self.last_version_diagbox:
             self.fetch_last_version_diagbox()
@@ -3529,12 +3855,451 @@ class MainWindow(QtWidgets.QWidget):
 
         return w
 
-    def page_update(self):
+    def page_vhd(self):
         w = QtWidgets.QWidget()
         layout = QtWidgets.QVBoxLayout(w)
-        layout.addWidget(QtWidgets.QLabel(translator.t('messages.page_update')))
+        layout.setSpacing(12)
+
+        # Page title
+        page_title = QtWidgets.QLabel(translator.t('titles.diagbox_vhdx_install'))
+        page_title.setObjectName("pageTitle")
+        page_title.setStyleSheet("font-size: 18px; font-weight: bold; color: #5cb85c; padding: 10px;")
+        page_title.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(page_title)
+
+        # Header - Download Size (will be updated dynamically)
+        self.vhdx_size_header = QtWidgets.QLabel(translator.t('vhd.labels.download_size'))
+        self.vhdx_size_header.setObjectName("sectionHeader")
+        self.vhdx_size_header.setWordWrap(True)
+        layout.addWidget(self.vhdx_size_header)
+        
+        # VHD Download URL from config
+        self.vhd_download_link = URL_VHD_DOWNLOAD
+        
+        # Fetch download size on page load
+        QtCore.QTimer.singleShot(500, self.fetch_vhdx_download_size)
+
+        # Destination disk selection
+        disk_layout = QtWidgets.QHBoxLayout()
+        disk_label = QtWidgets.QLabel(translator.t('vhd.labels.destination_disk'))
+        disk_label.setStyleSheet("font-size: 12px;")
+        self.vhdx_disk_combo = QtWidgets.QComboBox()
+        self.vhdx_disk_combo.setMinimumWidth(150)
+        # Populate with available drives
+        self.populate_vhdx_drives()
+        disk_layout.addWidget(disk_label)
+        disk_layout.addWidget(self.vhdx_disk_combo)
+        disk_layout.addStretch()
+        layout.addLayout(disk_layout)
+
+        # Auto installation toggle
+        auto_install_layout = QtWidgets.QHBoxLayout()
+        auto_install_label = QtWidgets.QLabel(translator.t('labels.auto_install'))
+        auto_install_label.setStyleSheet("font-size: 12px;")
+        self.vhdx_auto_install_toggle = QtWidgets.QCheckBox()
+        self.vhdx_auto_install_toggle.setChecked(False)
+        auto_install_layout.addStretch()
+        auto_install_layout.addWidget(self.vhdx_auto_install_toggle)
+        auto_install_layout.addWidget(auto_install_label)
+        layout.addLayout(auto_install_layout)
+
+        # Action buttons - Télécharger and Installer
+        btn_layout = QtWidgets.QHBoxLayout()
+        
+        self.vhdx_download_btn = QtWidgets.QPushButton(translator.t('buttons.download'))
+        self.vhdx_download_btn.setMinimumHeight(44)
+        self.vhdx_download_btn.setObjectName("actionButton")
+        self.vhdx_download_btn.setMinimumWidth(200)
+        self.vhdx_download_btn.clicked.connect(self.download_vhdx)
+        
+        self.vhdx_install_btn = QtWidgets.QPushButton(translator.t('buttons.install'))
+        self.vhdx_install_btn.setMinimumHeight(44)
+        self.vhdx_install_btn.setObjectName("actionButton")
+        self.vhdx_install_btn.setMinimumWidth(200)
+        self.vhdx_install_btn.clicked.connect(self.install_vhdx)
+        
+        btn_layout.addWidget(self.vhdx_download_btn)
+        btn_layout.addWidget(self.vhdx_install_btn)
+        layout.addLayout(btn_layout)
+
+        # Pause and Cancel buttons for VHD (hidden by default)
+        vhd_buttons_row = QtWidgets.QHBoxLayout()
+        
+        self.vhd_pause_button = QtWidgets.QPushButton(translator.t('buttons.pause'))
+        self.vhd_pause_button.setMinimumHeight(44)
+        self.vhd_pause_button.setObjectName("actionButton")
+        self.vhd_pause_button.setStyleSheet("background-color: #f0ad4e; color: white;")
+        self.vhd_pause_button.clicked.connect(self.toggle_pause_vhd_download)
+        self.vhd_pause_button.setVisible(False)
+        vhd_buttons_row.addWidget(self.vhd_pause_button)
+        
+        self.vhd_cancel_button = QtWidgets.QPushButton(translator.t('buttons.cancel'))
+        self.vhd_cancel_button.setMinimumHeight(44)
+        self.vhd_cancel_button.setObjectName("actionButton")
+        self.vhd_cancel_button.setStyleSheet("background-color: #d9534f; color: white;")
+        self.vhd_cancel_button.clicked.connect(self.cancel_vhd_download)
+        self.vhd_cancel_button.setVisible(False)
+        vhd_buttons_row.addWidget(self.vhd_cancel_button)
+        
+        layout.addLayout(vhd_buttons_row)
+
+        # Separator line
+        separator = QtWidgets.QFrame()
+        separator.setFrameShape(QtWidgets.QFrame.Shape.HLine)
+        separator.setStyleSheet("background-color: #3a3a3a;")
+        layout.addWidget(separator)
+
+        # PC Configuration section
+        config_label = QtWidgets.QLabel(translator.t('labels.system_config'))
+        config_label.setObjectName("sectionHeader")
+        config_label.setStyleSheet("font-size: 13px; font-weight: bold;")
+        layout.addWidget(config_label)
+
+        # Configuration details
+        config_frame = QtWidgets.QFrame()
+        config_layout = QtWidgets.QFormLayout(config_frame)
+        config_layout.setLabelAlignment(QtCore.Qt.AlignmentFlag.AlignRight)
+        config_layout.setFormAlignment(QtCore.Qt.AlignmentFlag.AlignLeft)
+        config_layout.setHorizontalSpacing(20)
+        
+        self.vhdx_windows_label = QtWidgets.QLabel()
+        self.vhdx_storage_label = QtWidgets.QLabel()
+        self.vhdx_ram_label = QtWidgets.QLabel()
+        
+        config_layout.addRow(translator.t('labels.windows_version'), self.vhdx_windows_label)
+        config_layout.addRow(translator.t('labels.free_storage'), self.vhdx_storage_label)
+        config_layout.addRow(translator.t('labels.ram'), self.vhdx_ram_label)
+        
+        layout.addWidget(config_frame)
+
+        # Update configuration display
+        self.update_vhdx_config()
+
         layout.addStretch()
         return w
+
+    def populate_vhdx_drives(self):
+        """Populate the drive combo box with available drives"""
+        try:
+            import string
+            from ctypes import windll
+            
+            self.vhdx_disk_combo.clear()
+            drives = []
+            bitmask = windll.kernel32.GetLogicalDrives()
+            for letter in string.ascii_uppercase:
+                if bitmask & 1:
+                    drives.append(letter)
+                bitmask >>= 1
+            
+            for drive in drives:
+                try:
+                    usage = psutil.disk_usage(f"{drive}:\\")
+                    free_gb = usage.free / (1024**3)
+                    self.vhdx_disk_combo.addItem(f"{drive}: ({free_gb:.1f} GB free)", userData=drive)
+                except:
+                    self.vhdx_disk_combo.addItem(f"{drive}:", userData=drive)
+        except Exception as e:
+            logger.error(f"Failed to populate drives: {e}")
+            self.vhdx_disk_combo.addItem("C:", userData="C")
+
+    def update_vhdx_config(self):
+        """Update VHD configuration display"""
+        # Windows version
+        system = platform.system()
+        release = platform.release()
+        if system == "Windows":
+            version_info = sys.getwindowsversion()
+            if version_info.major == 10:
+                if version_info.build >= 22000:
+                    os_text = "Windows 11"
+                else:
+                    os_text = "Windows 10"
+                os_text += " 64 Bits" if platform.machine().endswith('64') else " 32 Bits"
+            else:
+                os_text = f"{system} {release}"
+        else:
+            os_text = f"{system} {release}"
+        self.vhdx_windows_label.setText(os_text)
+
+        # Storage - check for minimum 50 GB requirement
+        try:
+            selected_drive = self.vhdx_disk_combo.currentData()
+            if selected_drive:
+                storage = psutil.disk_usage(f"{selected_drive}:\\")
+                free_gb = storage.free / (1024 ** 3)
+                self.vhdx_storage_label.setText(f"{free_gb:.1f} GB")
+                
+                # Mark in red if less than 50 GB
+                if free_gb < 50:
+                    self.vhdx_storage_label.setStyleSheet("color: red; font-weight: bold;")
+                else:
+                    self.vhdx_storage_label.setStyleSheet("")
+        except:
+            self.vhdx_storage_label.setText("N/A")
+            self.vhdx_storage_label.setStyleSheet("")
+
+        # RAM
+        ram_gb = psutil.virtual_memory().total / (1024 ** 3)
+        self.vhdx_ram_label.setText(f"{ram_gb:.1f} GB")
+
+    def fetch_vhdx_download_size(self):
+        """Fetch VHDX download size from URL"""
+        if not self.vhd_download_link:
+            # Default URL or fetch from config
+            # TODO: Set actual VHD download link
+            self.vhd_download_link = ""  # Placeholder
+            self.vhdx_size_header.setText(translator.t('vhd.labels.download_size_default'))
+            return
+        
+        try:
+            logger.info(f"Fetching VHDX file size from: {self.vhd_download_link}")
+            response = requests.head(self.vhd_download_link, allow_redirects=True, timeout=10)
+            content_length = response.headers.get('Content-Length')
+            
+            if content_length:
+                file_size_bytes = int(content_length)
+                file_size_gb = round(file_size_bytes / 1024 / 1024 / 1024, 2)
+                
+                self.vhdx_size_header.setText(
+                    translator.t('vhd.labels.download_size_with_space', size=file_size_gb)
+                )
+                logger.info(f"VHDX file size: {file_size_gb} GB")
+            else:
+                self.vhdx_size_header.setText(translator.t('vhd.labels.download_size_default'))
+        except Exception as e:
+            logger.error(f"Failed to fetch VHDX file size: {e}")
+            self.vhdx_size_header.setText(translator.t('vhd.labels.download_size_default'))
+    
+    def check_vhdx_disk_space(self):
+        """Check if selected drive has at least 50 GB free space"""
+        try:
+            selected_drive = self.vhdx_disk_combo.currentData()
+            if selected_drive:
+                storage = psutil.disk_usage(f"{selected_drive}:\\")
+                free_gb = storage.free / (1024 ** 3)
+                return free_gb >= 50
+        except Exception as e:
+            logger.error(f"Failed to check disk space: {e}")
+        return False
+
+    def download_vhdx(self):
+        """Download VHDX file"""
+        # Check disk space before downloading
+        if not self.check_vhdx_disk_space():
+            selected_drive = self.vhdx_disk_combo.currentData()
+            try:
+                storage = psutil.disk_usage(f"{selected_drive}:\\")
+                free_gb = storage.free / (1024 ** 3)
+                QtWidgets.QMessageBox.warning(
+                    self,
+                    "Espace insuffisant",
+                    f"Espace disponible sur {selected_drive}: : {free_gb:.1f} GO\n\n"
+                    f"Espace minimum requis : 50 GO\n\n"
+                    f"Veuillez libérer de l'espace ou sélectionner un autre disque."
+                )
+            except:
+                QtWidgets.QMessageBox.warning(
+                    self,
+                    "Espace insuffisant",
+                    "Espace disque insuffisant pour télécharger et installer le VHDX.\n\n"
+                    "Espace minimum requis : 50 GO"
+                )
+            return
+        
+        # Check if URL is configured
+        if not self.vhd_download_link:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Configuration manquante",
+                "L'URL de téléchargement VHDX n'est pas configurée.\n\n"
+                "Veuillez contacter l'administrateur."
+            )
+            return
+        
+        # Disable buttons
+        self.set_buttons_enabled(False)
+        
+        # Update footer
+        if hasattr(self, 'footer_label'):
+            self.footer_label.setText(translator.t('vhd.download.in_progress'))
+        if hasattr(self, 'footer_progress'):
+            self.footer_progress.setRange(0, 1000)
+            self.footer_progress.setValue(0)
+            self.footer_progress.setFormat("%p%")
+        
+        # Get selected drive
+        selected_drive = self.vhdx_disk_combo.currentData()
+        
+        # Show pause and cancel buttons
+        if self.vhd_pause_button:
+            self.vhd_pause_button.setVisible(True)
+            self.vhd_pause_button.setText(translator.t('buttons.pause'))
+        if self.vhd_cancel_button:
+            self.vhd_cancel_button.setVisible(True)
+        
+        # Start download thread
+        logger.info(f"Starting VHDX download to drive {selected_drive}:")
+        self.vhdx_download_thread = VHDXDownloadThread(
+            self.vhd_download_link,
+            f"{selected_drive}:\\VHD",
+            selected_drive
+        )
+        self.vhdx_download_thread.progress.connect(self.update_vhdx_progress)
+        self.vhdx_download_thread.finished.connect(self.on_vhdx_download_finished)
+        self.vhdx_download_thread.start()
+
+    def update_vhdx_progress(self, value, speed, eta):
+        """Update VHDX download progress"""
+        if hasattr(self, 'footer_progress'):
+            self.footer_progress.setValue(value)
+            if speed > 0:
+                self.footer_progress.setFormat(f"{value/10:.1f}% - {speed:.2f} MB/s - ETA: {eta}")
+            else:
+                self.footer_progress.setFormat(f"{value/10:.1f}%")
+        
+        if hasattr(self, 'footer_label'):
+            self.footer_label.setText(translator.t('vhd.download.speed', speed=f"{speed:.2f}"))
+
+    def on_vhdx_download_finished(self, success, message):
+        """Called when VHDX download finishes"""
+        # Hide pause and cancel buttons
+        if self.vhd_pause_button:
+            self.vhd_pause_button.setVisible(False)
+            self.vhd_pause_button.setText(translator.t('buttons.pause'))
+        if self.vhd_cancel_button:
+            self.vhd_cancel_button.setVisible(False)
+        
+        # Re-enable buttons
+        self.set_buttons_enabled(True)
+        
+        # Update footer
+        if hasattr(self, 'footer_label'):
+            self.footer_label.setText(message)
+        if hasattr(self, 'footer_progress'):
+            if success:
+                self.footer_progress.setValue(1000)
+            else:
+                self.footer_progress.setValue(0)
+        
+        if success:
+            QtWidgets.QMessageBox.information(
+                self,
+                translator.t('vhd.download.success'),
+                message
+            )
+            
+            # If auto-install is enabled, start installation
+            if hasattr(self, 'vhdx_auto_install_toggle') and self.vhdx_auto_install_toggle.isChecked():
+                logger.info("Auto-install enabled, starting VHDX installation")
+                QtCore.QTimer.singleShot(1000, self.install_vhdx)
+        else:
+            QtWidgets.QMessageBox.warning(
+                self,
+                translator.t('vhd.download.failed'),
+                message
+            )
+        
+        # Reset footer after delay
+        QtCore.QTimer.singleShot(3000, self.reset_footer)
+
+    def install_vhdx(self):
+        """Install VHDX file"""
+        # Search for PSA-DIAG.vhdx on all available drives
+        vhdx_file = None
+        found_drive = None
+        
+        try:
+            import string
+            # Get all available drive letters
+            available_drives = []
+            for letter in string.ascii_uppercase:
+                drive = f"{letter}:"
+                if os.path.exists(drive):
+                    available_drives.append(letter)
+            
+            logger.info(f"Searching for PSA-DIAG.vhdx on drives: {', '.join(available_drives)}")
+            
+            # Search for PSA-DIAG.vhdx in X:\VHD\ on all drives
+            for letter in available_drives:
+                vhd_folder = os.path.join(f"{letter}:\\", "VHD")
+                target_file = os.path.join(vhd_folder, "PSA-DIAG.vhdx")
+                
+                if os.path.exists(target_file):
+                    vhdx_file = target_file
+                    found_drive = letter
+                    logger.info(f"Found VHDX file: {vhdx_file}")
+                    break
+        except Exception as e:
+            logger.error(f"Error searching for VHDX file: {e}")
+        
+        if not vhdx_file:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Fichier introuvable",
+                "Aucun fichier PSA-DIAG.vhdx trouvé dans X:\\VHD\\ sur aucun lecteur.\n\n"
+                "Veuillez d'abord télécharger le fichier VHDX."
+            )
+            return
+        
+        # Confirm installation
+        reply = QtWidgets.QMessageBox.question(
+            self,
+            "Confirmation",
+            f"Êtes-vous sûr de vouloir installer ce VHDX ?\n\n"
+            f"Fichier: {os.path.basename(vhdx_file)}\n"
+            f"Chemin: {vhdx_file}\n\n"
+            f"Cette opération va modifier votre configuration de démarrage (BCD).\n"
+            f"Vous devrez redémarrer votre ordinateur après l'installation.",
+            QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No,
+            QtWidgets.QMessageBox.StandardButton.No
+        )
+        
+        if reply != QtWidgets.QMessageBox.StandardButton.Yes:
+            return
+        
+        # Disable buttons
+        self.set_buttons_enabled(False)
+        
+        # Update footer
+        if hasattr(self, 'footer_label'):
+            self.footer_label.setText("Installation VHDX en cours...")
+        if hasattr(self, 'footer_progress'):
+            self.footer_progress.setRange(0, 0)  # Indeterminate
+        
+        # Start installation thread
+        logger.info(f"Starting VHDX installation: {vhdx_file}")
+        self.vhdx_install_thread = VHDXInstallThread(vhdx_file, "PSA-DIAG")
+        self.vhdx_install_thread.finished.connect(self.on_vhdx_install_finished)
+        self.vhdx_install_thread.start()
+
+    def on_vhdx_install_finished(self, success, message):
+        """Called when VHDX installation finishes"""
+        # Re-enable buttons
+        self.set_buttons_enabled(True)
+        
+        # Update footer
+        if hasattr(self, 'footer_label'):
+            self.footer_label.setText(translator.t('vhd.install.complete') if success else translator.t('vhd.install.failed'))
+        if hasattr(self, 'footer_progress'):
+            self.footer_progress.setRange(0, 1000)
+            self.footer_progress.setValue(1000 if success else 0)
+        
+        if success:
+            QtWidgets.QMessageBox.information(
+                self,
+                translator.t('vhd.install.success'),
+                message
+            )
+        else:
+            QtWidgets.QMessageBox.critical(
+                self,
+                translator.t('vhd.install.failed'),
+                message
+            )
+        
+        # Reset footer after delay
+        QtCore.QTimer.singleShot(3000, self.reset_footer)
 
     def page_about(self):
         w = QtWidgets.QWidget()

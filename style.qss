@@ -50,7 +50,7 @@ QPushButton[checkable="true"] {
     padding: 12px;
     border-radius: 10px;
     text-align: center;
-    icon-size: 24px;
+    icon-size: 42px;
 }
 
 QPushButton[checkable="true"]:hover {
@@ -129,7 +129,7 @@ QPushButton[checkable="true"]:disabled {
                                 stop:0 #26292d, stop:1 #1f2124);
     border: 2px solid #2a2e32;
     color: #757a7f;
-    icon-size: 24px;
+    icon-size: 42px;
 }
 
 /* Action buttons with more volume */

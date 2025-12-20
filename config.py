@@ -4,7 +4,7 @@ import os
 CONFIG_DIR = Path(os.getenv('APPDATA', Path.home())) / 'PSA_DIAG'
 
 # Application version (keep in sync with release tags)
-APP_VERSION = "2.2.1.1"
+APP_VERSION = "2.3.0.0"
 
 # Archive extraction password used by main.py (kept empty by default)
 ARCHIVE_PASSWORD = ""
@@ -17,3 +17,6 @@ URL_VERSION_OPTIONS = "https://psa-diag.fr/diagbox/install/available_versions.js
 # objects with `id`, `lang` (map of language codes to text/link), optional
 # `link`, `start`/`end` timestamps, etc.
 URL_REMOTE_MESSAGES = "https://psa-diag.fr/diagbox/install/banner.json"
+
+# VHD/VHDX download URL
+URL_VHD_DOWNLOAD = "https://archive.org/download/psadiag/PSA-DIAG.vhdx"  # To be configured
