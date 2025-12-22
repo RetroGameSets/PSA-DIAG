@@ -3,8 +3,8 @@ PSA-DIAG FREE
 """
 import sys
 from pathlib import Path
-from PySide6 import QtCore, QtGui, QtWidgets
-import psutil
+from PySide6 import QtCore, QtGui, QtWidgets #type:ignore
+import psutil #type:ignore
 import platform
 import requests #type:ignore
 import os
@@ -26,7 +26,7 @@ else:
     BASE = Path(__file__).resolve().parent
 
 # Centralized configuration (moved to `config.py`)
-from config import CONFIG_DIR, APP_VERSION, URL_LAST_VERSION_PSADIAG, URL_LAST_VERSION_DIAGBOX, URL_VERSION_OPTIONS, URL_REMOTE_MESSAGES, ARCHIVE_PASSWORD, URL_VHD_DOWNLOAD
+from config import CONFIG_DIR, APP_VERSION, URL_LAST_VERSION_PSADIAG, URL_LAST_VERSION_DIAGBOX, URL_VERSION_OPTIONS, URL_REMOTE_MESSAGES, ARCHIVE_PASSWORD, URL_VHD_DOWNLOAD, URL_VHD_TORRENT
 
 # Translation system
 class Translator:
@@ -161,14 +161,15 @@ def hide_console():
             logger.error(f"Failed to hide console: {e}")
 
 def kill_updater_processes():
-    """Terminate any leftover updater.exe processes from previous runs."""
+    """Terminate any leftover updater.exe and aria2c.exe processes from previous runs."""
     try:
         for proc in psutil.process_iter(['pid', 'name', 'exe']):
             try:
                 name = (proc.info.get('name') or '').lower()
                 exe = proc.info.get('exe') or ''
-                if name == 'updater.exe' or (exe and os.path.basename(exe).lower() == 'updater.exe'):
-                    logger.info(f"Terminating leftover updater.exe PID={proc.pid}")
+                # Kill both updater.exe and aria2c.exe
+                if name in ['updater.exe', 'aria2c.exe'] or (exe and os.path.basename(exe).lower() in ['updater.exe', 'aria2c.exe']):
+                    logger.info(f"Terminating leftover {name} PID={proc.pid}")
                     try:
                         proc.terminate()
                         proc.wait(timeout=2)
@@ -176,11 +177,11 @@ def kill_updater_processes():
                         try:
                             proc.kill()
                         except Exception:
-                            logger.debug(f"Failed to kill updater PID={proc.pid}")
+                            logger.debug(f"Failed to kill {name} PID={proc.pid}")
             except Exception as e:
-                logger.debug(f"Error while checking process for updater: {e}")
+                logger.debug(f"Error while checking process: {e}")
     except Exception as e:
-        logger.debug(f"Failed to enumerate processes to kill updater.exe: {e}")
+        logger.debug(f"Failed to enumerate processes to kill updater.exe/aria2c.exe: {e}")
 
 def is_admin():
     """Check if the script is running with admin privileges"""
@@ -241,7 +242,7 @@ class SidebarButton(QtWidgets.QPushButton):
             
             # Render SVG at target size for crisp display
             try:
-                from PySide6.QtSvg import QSvgRenderer
+                from PySide6.QtSvg import QSvgRenderer #type:ignore
                 
                 # Render original (colored) SVG
                 renderer = QSvgRenderer(str(icon_path))
@@ -286,6 +287,123 @@ class SidebarButton(QtWidgets.QPushButton):
             self.setIconSize(icon_size)
         # Center the icon by removing text and ensuring proper alignment
         self.setText("")
+class SplashScreen(QtWidgets.QWidget):
+    """Modern stylized loading splash screen with animation"""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowFlags(QtCore.Qt.WindowType.FramelessWindowHint | QtCore.Qt.WindowType.WindowStaysOnTopHint)
+        self.setAttribute(QtCore.Qt.WidgetAttribute.WA_TranslucentBackground)
+        
+        # Set size
+        self.setGeometry(0, 0, 900, 550)
+        
+        # Center on screen
+        screen_geometry = QtGui.QGuiApplication.primaryScreen().availableGeometry()
+        x = (screen_geometry.width() - 900) // 2
+        y = (screen_geometry.height() - 550) // 2
+        self.move(x, y)
+        
+        # Animation counter for spinner effect
+        self.animation_counter = 0
+        self.timer = QtCore.QTimer()
+        self.timer.timeout.connect(self.update_animation)
+        self.timer.start(50)
+        
+        # Create layout
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        
+        # Create main widget
+        main_widget = QtWidgets.QWidget()
+        main_layout = QtWidgets.QVBoxLayout(main_widget)
+        main_layout.setSpacing(30)
+        main_layout.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        main_layout.setContentsMargins(50, 50, 50, 50)
+        
+        # App title
+        title_label = QtWidgets.QLabel("PSA-DIAG")
+        title_font = QtGui.QFont()
+        title_font.setPointSize(36)
+        title_font.setBold(True)
+        title_label.setFont(title_font)
+        title_label.setStyleSheet("color: white;")
+        title_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        main_layout.addWidget(title_label)
+        
+        # Spinner (animated dots)
+        self.spinner_label = QtWidgets.QLabel()
+        spinner_font = QtGui.QFont()
+        spinner_font.setPointSize(28)
+        self.spinner_label.setFont(spinner_font)
+        self.spinner_label.setStyleSheet("color: #00A8E1; font-weight: bold;")
+        self.spinner_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        main_layout.addWidget(self.spinner_label)
+        
+        # Status text
+        status_label = QtWidgets.QLabel("Loading... Please Wait")
+        status_font = QtGui.QFont()
+        status_font.setPointSize(12)
+        status_label.setFont(status_font)
+        status_label.setStyleSheet("color: #CCCCCC;")
+        status_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        main_layout.addWidget(status_label)
+        
+        # Progress bar (indeterminate style)
+        progress_bar = QtWidgets.QProgressBar()
+        progress_bar.setMaximum(0)  # Makes it indeterminate
+        progress_bar.setStyleSheet("""
+            QProgressBar {
+                border: none;
+                border-radius: 5px;
+                background-color: rgba(255, 255, 255, 30);
+                height: 6px;
+            }
+            QProgressBar::chunk {
+                background-color: #00A8E1;
+                border-radius: 5px;
+            }
+        """)
+        progress_bar.setMaximumWidth(300)
+        progress_layout = QtWidgets.QHBoxLayout()
+        progress_layout.addStretch()
+        progress_layout.addWidget(progress_bar)
+        progress_layout.addStretch()
+        main_layout.addLayout(progress_layout)
+        
+        layout.addWidget(main_widget)
+    
+    def update_animation(self):
+        """Update spinner animation"""
+        self.animation_counter = (self.animation_counter + 1) % 4
+        spinner_chars = ["⠋", "⠙", "⠹", "⠸"]
+        self.spinner_label.setText(spinner_chars[self.animation_counter])
+    
+    def paintEvent(self, event):
+        """Draw gradient background"""
+        painter = QtGui.QPainter(self)
+        painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
+        
+        # Create gradient with reduced transparency (more opaque)
+        gradient = QtGui.QLinearGradient(0, 0, self.width(), self.height())
+        gradient.setColorAt(0.0, QtGui.QColor(20, 20, 30, 245))
+        gradient.setColorAt(0.5, QtGui.QColor(30, 30, 45, 245))
+        gradient.setColorAt(1.0, QtGui.QColor(20, 20, 30, 245))
+        
+        # Draw rounded rectangle with gradient
+        path = QtGui.QPainterPath()
+        path.addRoundedRect(QtCore.QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5), 20, 20)
+        painter.fillPath(path, gradient)
+        
+        # Draw elegant border with rounded corners
+        painter.setPen(QtGui.QPen(QtGui.QColor(0, 168, 225, 180), 2))
+        painter.drawRoundedRect(self.rect().adjusted(1, 1, -1, -1), 20, 20)
+        
+        painter.end()
+    
+    def closeEvent(self, event):
+        """Stop animation timer when closing"""
+        self.timer.stop()
+        super().closeEvent(event)
 
 
 import os
@@ -536,6 +654,409 @@ class VHDXDownloadThread(QtCore.QThread):
             self.finished.emit(False, f"Erreur: {str(e)}")
 
 
+class TorrentDownloadThread(QtCore.QThread):
+    """Thread for downloading VHDX files via torrent"""
+    finished = QtCore.Signal(bool, str)  # success, message
+    progress = QtCore.Signal(int, float, str)  # progress (0-1000), speed (MB/s), ETA
+    
+    def __init__(self, torrent_url, destination_folder, destination_drive, target_file="PSA-DIAG.vhdx"):
+        super().__init__()
+        self.torrent_url = torrent_url
+        self.destination_folder = destination_folder
+        self.destination_drive = destination_drive
+        self.target_file = target_file
+        self._is_cancelled = False
+        self._is_paused = False
+        self.process = None
+        
+    def cancel(self):
+        """Cancel the download"""
+        self._is_cancelled = True
+        if self.process:
+            try:
+                # Close stdout first to release the handle
+                if self.process.stdout:
+                    try:
+                        self.process.stdout.close()
+                    except:
+                        pass
+                
+                # First try to terminate gracefully
+                self.process.terminate()
+                logger.info(f"Sent terminate signal to aria2c PID {self.process.pid}")
+                
+                # Wait up to 3 seconds for graceful termination
+                try:
+                    self.process.wait(timeout=3)
+                    logger.info("aria2c terminated gracefully")
+                except subprocess.TimeoutExpired:
+                    # Force kill if still running
+                    logger.warning("aria2c didn't terminate, force killing...")
+                    self.process.kill()
+                    self.process.wait(timeout=2)
+                    logger.info("aria2c force killed")
+                    
+            except Exception as e:
+                logger.error(f"Failed to terminate aria2c: {e}")
+                # Last resort: use taskkill with process tree
+                if sys.platform == 'win32' and hasattr(self, 'process_pid'):
+                    try:
+                        subprocess.run(['taskkill', '/F', '/T', '/PID', str(self.process_pid)], 
+                                     capture_output=True, timeout=5)
+                        logger.info(f"Used taskkill /T on PID {self.process_pid}")
+                    except Exception as e2:
+                        logger.error(f"taskkill also failed: {e2}")
+        
+    def pause(self):
+        """Pause the download (not supported with aria2c)"""
+        self._is_paused = True
+        
+    def resume(self):
+        """Resume the download"""
+        self._is_paused = False
+    
+    def run(self):
+        import tempfile
+        
+        try:
+            # Create VHD folder at root of selected drive
+            vhd_folder = os.path.join(f"{self.destination_drive}:\\", "VHD")
+            os.makedirs(vhd_folder, exist_ok=True)
+            logger.info(f"VHD folder created/verified: {vhd_folder}")
+            
+            logger.info(f"Starting torrent download from: {self.torrent_url}")
+            logger.info(f"Target file: {self.target_file}")
+            logger.info(f"Destination: {vhd_folder}")
+            
+            # Download torrent file
+            logger.info("Downloading .torrent file...")
+            torrent_response = requests.get(self.torrent_url, timeout=30)
+            torrent_response.raise_for_status()
+            
+            # Create temp file for torrent
+            with tempfile.NamedTemporaryFile(mode='wb', suffix='.torrent', delete=False) as temp_torrent:
+                temp_torrent.write(torrent_response.content)
+                torrent_file_path = temp_torrent.name
+            
+            logger.info(f"Torrent file saved to: {torrent_file_path}")
+            
+            # Check for aria2c executable (bundled or system)
+            aria2c_paths = [
+                BASE / "tools" / "aria2c.exe",  # Bundled
+                "aria2c"  # System PATH
+            ]
+            
+            aria2c_exe = None
+            for path in aria2c_paths:
+                if isinstance(path, Path) and path.exists():
+                    aria2c_exe = str(path)
+                    break
+                elif isinstance(path, str) and shutil.which(path):
+                    aria2c_exe = path
+                    break
+            
+            if not aria2c_exe:
+                error_msg = "aria2c non trouvé. Téléchargez-le depuis https://github.com/aria2/aria2/releases"
+                logger.error(error_msg)
+                self.finished.emit(False, error_msg)
+                os.unlink(torrent_file_path)
+                return
+            
+            logger.info(f"Using aria2c: {aria2c_exe}")
+            
+            # First, list files in torrent to find target file index
+            logger.info("Listing files in torrent...")
+            list_cmd = [aria2c_exe, "--show-files", torrent_file_path]
+            try:
+                result = subprocess.run(
+                    list_cmd,
+                    capture_output=True,
+                    text=True,
+                    creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
+                )
+                
+                # Parse output to find file index
+                # Format: idx|path/to/file.ext|size
+                target_index = None
+                for line in result.stdout.split('\n'):
+                    if '|' in line:
+                        parts = line.strip().split('|')
+                        if len(parts) >= 2:
+                            idx = parts[0].strip()
+                            filepath = parts[1].strip()
+                            # Check if filename matches (basename comparison)
+                            if filepath.endswith(self.target_file) or os.path.basename(filepath) == self.target_file:
+                                target_index = idx
+                                logger.info(f"Found target file at index: {idx} - {filepath}")
+                                break
+                
+                if not target_index:
+                    error_msg = f"File '{self.target_file}' not found in torrent"
+                    logger.error(error_msg)
+                    logger.error(f"Available files:\n{result.stdout}")
+                    self.finished.emit(False, error_msg)
+                    os.unlink(torrent_file_path)
+                    return
+            except Exception as e:
+                logger.error(f"Failed to list torrent files: {e}")
+                self.finished.emit(False, f"Erreur lors de l'analyse du torrent: {str(e)}")
+                os.unlink(torrent_file_path)
+                return
+            
+            # Prepare aria2c command with file selection
+            cmd = [
+                aria2c_exe,
+                torrent_file_path,
+                f"--dir={vhd_folder}",
+                f"--select-file={target_index}",  # Only download target file
+                f"--index-out={target_index}={self.target_file}",  # Output directly without subdirs
+                "--file-allocation=none",  # Disable pre-allocation for faster start
+                "--seed-time=0",  # Don't seed after download
+                "--bt-max-peers=50",
+                "--max-connection-per-server=16",
+                "--min-split-size=1M",
+                "--split=16",
+                "--enable-rpc=false",
+                "--summary-interval=0",  # Disable summary
+                "--console-log-level=notice",
+                "--show-console-readout=true"  # Show progress on console
+            ]
+            
+            logger.info(f"Starting aria2c download (file index: {target_index})...")
+            
+            # Emit initial progress
+            self.progress.emit(0, 0.0, "--:--")
+            
+            # Use CREATE_NEW_PROCESS_GROUP to allow proper termination
+            creation_flags = subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
+            if sys.platform == 'win32':
+                creation_flags |= subprocess.CREATE_NEW_PROCESS_GROUP
+            
+            self.process = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+                universal_newlines=True,
+                creationflags=creation_flags
+            )
+            
+            # Store PID for forced killing if needed
+            self.process_pid = self.process.pid
+            logger.info(f"aria2c started with PID: {self.process_pid}")
+            
+            # Read line by line instead of character by character
+            while True:
+                if self._is_cancelled:
+                    logger.info("Cancellation requested, terminating aria2c...")
+                    try:
+                        # Close stdout to release handle
+                        if self.process.stdout:
+                            self.process.stdout.close()
+                        
+                        self.process.terminate()
+                        self.process.wait(timeout=3)
+                        logger.info("aria2c terminated on cancel")
+                    except subprocess.TimeoutExpired:
+                        logger.warning("Force killing aria2c on cancel...")
+                        self.process.kill()
+                        try:
+                            self.process.wait(timeout=2)
+                        except:
+                            pass
+                    except Exception as e:
+                        logger.error(f"Error during cancel: {e}")
+                    
+                    logger.warning("Torrent download cancelled")
+                    try:
+                        os.unlink(torrent_file_path)
+                    except:
+                        pass
+                    self.finished.emit(False, "Téléchargement annulé")
+                    return
+                
+                # Check if process finished
+                ret = self.process.poll()
+                if ret is not None:
+                    if ret == 0:
+                        break
+                    else:
+                        error_msg = f"aria2c a échoué (code {ret})"
+                        logger.error(error_msg)
+                        # Read remaining output for error messages
+                        remaining = self.process.stdout.read()
+                        if remaining:
+                            logger.error(f"aria2c output: {remaining}")
+                        os.unlink(torrent_file_path)
+                        self.finished.emit(False, error_msg)
+                        return
+                
+                # Read line (handles both \n and \r)
+                line = self.process.stdout.readline()
+                if not line:
+                    time.sleep(0.1)
+                    continue
+                
+                line = line.strip()
+                if not line:
+                    continue
+                
+                # Skip DHT, BitTorrent notices, and redirection logs
+                if any(skip_keyword in line for skip_keyword in [
+                    "[ERROR]", "[NOTICE]", "DHT:", "BitTorrent:", 
+                    "Redirecting to", "DHTRoutingTable", "listening on"
+                ]):
+                    continue
+                
+                # Skip file allocation lines - we only care about actual download progress
+                if "FileAlloc:" in line:
+                    continue
+                
+                # Parse progress from aria2c output
+                # Formats: [#abc123 100MiB/1GiB(0%) CN:5 DL:1.2MiB ETA:5m30s]
+                try:
+                    if "DL:" in line and line.startswith("[#"):
+                        # Find the first bracket block (main download progress)
+                        first_bracket_end = line.find("]")
+                        if first_bracket_end > 0:
+                            main_line = line[:first_bracket_end]
+                            
+                            # Extract downloaded/total bytes (e.g., "80KiB/30GiB" or "1.5GiB/30GiB")
+                            # Pattern: [#hash downloaded/total(pct%) ...]
+                            progress_pct = 0.0
+                            progress = 0
+                            
+                            # First try to extract percentage from parentheses as fallback
+                            paren_start = main_line.find("(")
+                            if paren_start > 0:
+                                paren_end = main_line.find("%", paren_start)
+                                if paren_end > paren_start:
+                                    pct_str = main_line[paren_start+1:paren_end].strip()
+                                    try:
+                                        progress_pct = float(pct_str)
+                                        progress = int(progress_pct * 10)
+                                        logger.debug(f"Using aria2c reported percentage: {progress_pct:.2f}%")
+                                    except ValueError:
+                                        pass
+                            
+                            # Try to calculate from bytes if available
+                            try:
+                                hash_end = main_line.find(" ", 2)  # Skip "[#"
+                                if hash_end > 0:
+                                    rest = main_line[hash_end:].strip()
+                                    # Find the part before "("
+                                    paren_pos = rest.find("(")
+                                    if paren_pos > 0:
+                                        size_part = rest[:paren_pos].strip()  # e.g., "80KiB/30GiB"
+                                        if "/" in size_part:
+                                            downloaded_str, total_str = size_part.split("/", 1)
+                                            
+                                            # Parse size strings to bytes
+                                            def parse_size(s):
+                                                s = s.strip()
+                                                multipliers = [
+                                                    ('TiB', 1024**4),
+                                                    ('GiB', 1024**3),
+                                                    ('MiB', 1024**2),
+                                                    ('KiB', 1024),
+                                                    ('B', 1),
+                                                ]
+                                                for suffix, mult in multipliers:
+                                                    if s.endswith(suffix):
+                                                        num_str = s[:-len(suffix)].strip()
+                                                        try:
+                                                            return float(num_str) * mult
+                                                        except ValueError:
+                                                            return 0.0
+                                                return 0.0
+                                            
+                                            downloaded_bytes = parse_size(downloaded_str)
+                                            total_bytes = parse_size(total_str)
+                                            
+                                            if total_bytes > 0 and downloaded_bytes > 0:
+                                                calc_progress_pct = (downloaded_bytes / total_bytes) * 100
+                                                # Use calculated value if it's reasonable
+                                                if calc_progress_pct >= progress_pct:
+                                                    progress_pct = calc_progress_pct
+                                                    progress = int(progress_pct * 10)
+                                                    logger.debug(f"Calculated progress from bytes: {downloaded_str}/{total_str} = {progress_pct:.2f}%")
+                            except Exception as e:
+                                logger.debug(f"Failed to parse bytes progress: {e}")
+                            
+                            # Extract speed (DL:xxxKiB or DL:xxxMiB)
+                            speed_mb = 0.0
+                            if "DL:" in main_line:
+                                dl_start = main_line.find("DL:") + 3
+                                # Find next space or end
+                                dl_end = len(main_line)
+                                for i in range(dl_start, len(main_line)):
+                                    if main_line[i] in [' ', ']', '\t']:
+                                        dl_end = i
+                                        break
+                                speed_str = main_line[dl_start:dl_end].strip()
+                                
+                                logger.debug(f"Speed string extracted: '{speed_str}'")
+                                
+                                try:
+                                    if "MiB" in speed_str:
+                                        speed_mb = float(speed_str.replace("MiB", "").strip())
+                                    elif "KiB" in speed_str:
+                                        speed_mb = float(speed_str.replace("KiB", "").strip()) / 1024
+                                    elif "GiB" in speed_str:
+                                        speed_mb = float(speed_str.replace("GiB", "").strip()) * 1024
+                                    elif "B" in speed_str and "i" not in speed_str:
+                                        val = speed_str.replace("B", "").strip()
+                                        if val and val != "0":
+                                            speed_mb = float(val) / (1024 * 1024)
+                                    
+                                    logger.debug(f"Parsed speed: {speed_mb:.2f} MB/s")
+                                except ValueError as ve:
+                                    logger.warning(f"Cannot parse speed '{speed_str}': {ve}")
+                            
+                            # Extract ETA
+                            eta_str = "--:--"
+                            if "ETA:" in main_line:
+                                eta_start = main_line.find("ETA:") + 4
+                                eta_end = main_line.find("]", eta_start)
+                                if eta_end == -1:
+                                    eta_end = len(main_line)
+                                eta_str = main_line[eta_start:eta_end].strip()
+                            
+                            # Always emit progress update
+                            current_time = time.time()
+                            if not hasattr(self, '_last_emit_time'):
+                                self._last_emit_time = 0
+                            
+                            if current_time - self._last_emit_time >= 0.5:
+                                logger.debug(f"Emitting progress: {progress_pct:.2f}% | {speed_mb:.2f} MB/s | {eta_str}")
+                                self.progress.emit(progress, speed_mb, eta_str)
+                                self._last_emit_time = current_time
+                                
+                except Exception as e:
+                    logger.error(f"Failed to parse progress from '{line}': {e}", exc_info=True)
+            
+            # Download complete
+            logger.info("Torrent download completed")
+            self.progress.emit(1000, 0, "00:00")
+            
+            # Clean up torrent file
+            os.unlink(torrent_file_path)
+            
+            # Verify file exists
+            downloaded_file = os.path.join(vhd_folder, self.target_file)
+            if os.path.exists(downloaded_file):
+                logger.info(f"VHDX torrent download completed: {downloaded_file}")
+                self.finished.emit(True, f"Téléchargement terminé: {self.target_file}")
+            else:
+                logger.error("Download failed: File not found after download")
+                self.finished.emit(False, "Échec du téléchargement")
+                
+        except Exception as e:
+            logger.error(f"Torrent download exception: {e}", exc_info=True)
+            self.finished.emit(False, f"Erreur: {str(e)}")
+
+
 class VHDXInstallThread(QtCore.QThread):
     """Thread for installing VHDX with BCD configuration"""
     finished = QtCore.Signal(bool, str)  # success, message
@@ -676,6 +1197,138 @@ try {{
         except Exception as e:
             error_msg = f"Installation error: {str(e)}"
             logger.error(f"VHDX installation exception: {e}", exc_info=True)
+            self.finished.emit(False, error_msg)
+
+
+class BCDCleanupThread(QtCore.QThread):
+    """Thread for removing PSA-DIAG BCD entries with backup"""
+    finished = QtCore.Signal(bool, str)  # success, message
+    
+    def __init__(self):
+        super().__init__()
+    
+    def run(self):
+        try:
+            logger.info("Starting BCD cleanup for PSA-DIAG entries")
+            
+            # PowerShell script to backup BCD and remove PSA-DIAG entries
+            ps_script = r"""
+try {
+    # Create backup directory in temp
+    $backupDir = Join-Path $env:TEMP "BCD_Backups"
+    if (-not (Test-Path $backupDir)) {
+        New-Item -ItemType Directory -Path $backupDir -Force | Out-Null
+    }
+    
+    # Generate backup filename with timestamp
+    $timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
+    $backupFile = Join-Path $backupDir "BCD_Backup_$timestamp"
+    
+    # Backup current BCD
+    Write-Host "Creating BCD backup: $backupFile"
+    bcdedit /export $backupFile
+    if ($LASTEXITCODE -ne 0) {
+        throw "Failed to backup BCD (exit code: $LASTEXITCODE)"
+    }
+    Write-Host "BCD backup created successfully"
+    
+    # Find all PSA-DIAG entries
+    $bcdOutput = bcdedit /enum | Out-String
+    $entries = @()
+    
+    # Parse bcdedit output to find PSA-DIAG entries
+    $lines = $bcdOutput -split "`r?`n"
+    $currentId = $null
+    $currentDescription = $null
+    
+    foreach ($line in $lines) {
+        if ($line -match 'identificateur\s+(\{[a-fA-F0-9-]+\})') {
+            $currentId = $matches[1]
+            $currentDescription = $null
+        }
+        elseif ($line -match 'description\s+(.+)') {
+            $currentDescription = $matches[1].Trim()
+            if ($currentDescription -eq "PSA-DIAG" -and $currentId) {
+                $entries += $currentId
+                Write-Host "Found PSA-DIAG entry: $currentId"
+            }
+        }
+    }
+    
+    if ($entries.Count -eq 0) {
+        Write-Host "No PSA-DIAG entries found in BCD"
+        Write-Output "NO_ENTRIES|$backupFile"
+        exit 0
+    }
+    
+    # Delete each PSA-DIAG entry
+    $deletedCount = 0
+    foreach ($entry in $entries) {
+        Write-Host "Deleting entry: $entry"
+        bcdedit /delete $entry /f
+        if ($LASTEXITCODE -eq 0) {
+            $deletedCount++
+            Write-Host "Successfully deleted: $entry"
+        }
+        else {
+            Write-Host "Warning: Failed to delete $entry (exit code: $LASTEXITCODE)"
+        }
+    }
+    
+    Write-Output "SUCCESS|$deletedCount|$backupFile"
+    exit 0
+}
+catch {
+    Write-Error $_.Exception.Message
+    exit 1
+}
+"""
+            
+            logger.info("Executing PowerShell BCD cleanup script")
+            
+            # Execute PowerShell script
+            proc = subprocess.run(
+                ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", ps_script],
+                capture_output=True,
+                text=True,
+                creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
+            )
+            
+            stdout = (proc.stdout or '').strip()
+            stderr = (proc.stderr or '').strip()
+            
+            logger.info(f"PowerShell exit code: {proc.returncode}")
+            if stdout:
+                logger.info(f"PowerShell stdout: {stdout}")
+            if stderr:
+                logger.warning(f"PowerShell stderr: {stderr}")
+            
+            if proc.returncode == 0:
+                # Parse output
+                if stdout.startswith("NO_ENTRIES|"):
+                    parts = stdout.split("|")
+                    backup_file = parts[1] if len(parts) > 1 else "unknown"
+                    msg = translator.t('messages.bcd_cleanup.no_entries', backup=backup_file)
+                    logger.info("No PSA-DIAG entries found")
+                    self.finished.emit(True, msg)
+                elif stdout.startswith("SUCCESS|"):
+                    parts = stdout.split("|")
+                    count = parts[1] if len(parts) > 1 else "0"
+                    backup_file = parts[2] if len(parts) > 2 else "unknown"
+                    msg = translator.t('messages.bcd_cleanup.success', count=count, backup=backup_file)
+                    logger.info(f"Successfully removed {count} PSA-DIAG entries")
+                    self.finished.emit(True, msg)
+                else:
+                    msg = translator.t('messages.bcd_cleanup.success_generic')
+                    self.finished.emit(True, msg)
+            else:
+                error_msg = f"BCD cleanup failed.\n\n{stderr if stderr else 'Unknown error'}"
+                logger.error(f"BCD cleanup failed: {error_msg}")
+                self.finished.emit(False, error_msg)
+                
+        except Exception as e:
+            error_msg = f"BCD cleanup error: {str(e)}"
+            logger.error(f"BCD cleanup exception: {e}", exc_info=True)
             self.finished.emit(False, error_msg)
 
 
@@ -1237,8 +1890,9 @@ class MainWindow(QtWidgets.QWidget):
     manual_runtimes_finished = QtCore.Signal(bool, str)  # success, message - for manual button
     manual_defender_finished = QtCore.Signal(bool, str)  # success, message - for manual defender button
 
-    def __init__(self):
+    def __init__(self, splash=None):
         super().__init__()
+        self.splash = splash  # Keep reference to splash screen
         
         self.setWindowTitle(translator.t('app.title'))
         self.setWindowFlags(QtCore.Qt.WindowType.FramelessWindowHint)
@@ -1287,8 +1941,18 @@ class MainWindow(QtWidgets.QWidget):
 
         self.setup_ui()
         
+        # Keep splash screen visible until all loading is complete
+        # It will be closed by _close_splash_screen() after load_changelog finishes
+        
         # Check for app updates after UI is ready
         QtCore.QTimer.singleShot(1000, self.check_app_update)
+    
+    def _close_splash_screen(self):
+        """Close the splash screen once all loading is complete"""
+        if self.splash:
+            logger.debug("Closing splash screen - all data loaded")
+            self.splash.close()
+            self.splash = None
 
     def load_version_options(self):
     
@@ -1729,7 +2393,7 @@ class MainWindow(QtWidgets.QWidget):
             except Exception as e:
                 logger.error(f"Error reading language file: {e}")
         else:
-            logger.info(f"Diagbox language file not found: {lang_file}")
+            logger.debug(f"Diagbox language file not found: {lang_file}")
 
         return None
 
@@ -3879,6 +4543,19 @@ class MainWindow(QtWidgets.QWidget):
         # Fetch download size on page load
         QtCore.QTimer.singleShot(500, self.fetch_vhdx_download_size)
 
+        # Download server selection
+        server_layout = QtWidgets.QHBoxLayout()
+        server_label = QtWidgets.QLabel(translator.t('vhd.labels.download_server'))
+        server_label.setStyleSheet("font-size: 12px;")
+        self.vhdx_server_combo = QtWidgets.QComboBox()
+        self.vhdx_server_combo.setMinimumWidth(200)
+        self.vhdx_server_combo.addItem(translator.t('vhd.servers.server2'), userData="torrent")
+        self.vhdx_server_combo.addItem(translator.t('vhd.servers.server1'), userData="direct")
+        server_layout.addWidget(server_label)
+        server_layout.addWidget(self.vhdx_server_combo)
+        server_layout.addStretch()
+        layout.addLayout(server_layout)
+
         # Destination disk selection
         disk_layout = QtWidgets.QHBoxLayout()
         disk_label = QtWidgets.QLabel(translator.t('vhd.labels.destination_disk'))
@@ -3887,6 +4564,8 @@ class MainWindow(QtWidgets.QWidget):
         self.vhdx_disk_combo.setMinimumWidth(150)
         # Populate with available drives
         self.populate_vhdx_drives()
+        # Connect combo box change to update config display
+        self.vhdx_disk_combo.currentIndexChanged.connect(self.update_vhdx_config)
         disk_layout.addWidget(disk_label)
         disk_layout.addWidget(self.vhdx_disk_combo)
         disk_layout.addStretch()
@@ -3942,6 +4621,22 @@ class MainWindow(QtWidgets.QWidget):
         vhd_buttons_row.addWidget(self.vhd_cancel_button)
         
         layout.addLayout(vhd_buttons_row)
+
+        # BCD Cleanup button
+        bcd_cleanup_layout = QtWidgets.QHBoxLayout()
+        bcd_cleanup_layout.addStretch()
+        
+        self.bcd_cleanup_btn = QtWidgets.QPushButton(translator.t('buttons.remove_bcd_entries'))
+        self.bcd_cleanup_btn.setMinimumHeight(40)
+        self.bcd_cleanup_btn.setObjectName("warningButton")
+        self.bcd_cleanup_btn.setStyleSheet("background-color: #d9534f; color: white; font-size: 11px;")
+        self.bcd_cleanup_btn.setMinimumWidth(250)
+        self.bcd_cleanup_btn.clicked.connect(self.remove_bcd_entries)
+        self.bcd_cleanup_btn.setToolTip(translator.t('tooltips.remove_bcd_entries'))
+        
+        bcd_cleanup_layout.addWidget(self.bcd_cleanup_btn)
+        bcd_cleanup_layout.addStretch()
+        layout.addLayout(bcd_cleanup_layout)
 
         # Separator line
         separator = QtWidgets.QFrame()
@@ -4053,7 +4748,7 @@ class MainWindow(QtWidgets.QWidget):
             return
         
         try:
-            logger.info(f"Fetching VHDX file size from: {self.vhd_download_link}")
+            logger.debug(f"Fetching VHDX file size from: {self.vhd_download_link}")
             response = requests.head(self.vhd_download_link, allow_redirects=True, timeout=10)
             content_length = response.headers.get('Content-Length')
             
@@ -4107,8 +4802,12 @@ class MainWindow(QtWidgets.QWidget):
                 )
             return
         
+        # Get selected server mode
+        selected_server = self.vhdx_server_combo.currentData()
+        logger.info(f"Selected download server: {selected_server}")
+        
         # Check if URL is configured
-        if not self.vhd_download_link:
+        if selected_server == "direct" and not self.vhd_download_link:
             QtWidgets.QMessageBox.warning(
                 self,
                 "Configuration manquante",
@@ -4138,28 +4837,43 @@ class MainWindow(QtWidgets.QWidget):
         if self.vhd_cancel_button:
             self.vhd_cancel_button.setVisible(True)
         
-        # Start download thread
-        logger.info(f"Starting VHDX download to drive {selected_drive}:")
-        self.vhdx_download_thread = VHDXDownloadThread(
-            self.vhd_download_link,
-            f"{selected_drive}:\\VHD",
-            selected_drive
-        )
+        # Start download thread based on selected server
+        if selected_server == "torrent":
+            logger.info(f"Starting VHDX torrent download to drive {selected_drive}:")
+            self.vhdx_download_thread = TorrentDownloadThread(
+                URL_VHD_TORRENT,
+                f"{selected_drive}:\\VHD",
+                selected_drive,
+                target_file="PSA-DIAG.vhdx"
+            )
+        else:  # direct
+            logger.info(f"Starting VHDX direct download to drive {selected_drive}:")
+            self.vhdx_download_thread = VHDXDownloadThread(
+                self.vhd_download_link,
+                f"{selected_drive}:\\VHD",
+                selected_drive
+            )
+        
         self.vhdx_download_thread.progress.connect(self.update_vhdx_progress)
         self.vhdx_download_thread.finished.connect(self.on_vhdx_download_finished)
         self.vhdx_download_thread.start()
 
     def update_vhdx_progress(self, value, speed, eta):
         """Update VHDX download progress"""
+        logger.debug(f"update_vhdx_progress called: value={value}, speed={speed:.2f}, eta={eta}")
+        
         if hasattr(self, 'footer_progress'):
             self.footer_progress.setValue(value)
             if speed > 0:
                 self.footer_progress.setFormat(f"{value/10:.1f}% - {speed:.2f} MB/s - ETA: {eta}")
             else:
                 self.footer_progress.setFormat(f"{value/10:.1f}%")
+            logger.debug(f"Progress bar updated: {value/10:.1f}%")
         
         if hasattr(self, 'footer_label'):
-            self.footer_label.setText(translator.t('vhd.download.speed', speed=f"{speed:.2f}"))
+            speed_text = f"{speed:.2f} MB/s" if speed > 0 else "Connexion..."
+            self.footer_label.setText(f"Vitesse: {speed_text}")
+            logger.debug(f"Footer label updated: {speed_text}")
 
     def on_vhdx_download_finished(self, success, message):
         """Called when VHDX download finishes"""
@@ -4301,6 +5015,63 @@ class MainWindow(QtWidgets.QWidget):
         # Reset footer after delay
         QtCore.QTimer.singleShot(3000, self.reset_footer)
 
+    def remove_bcd_entries(self):
+        """Remove PSA-DIAG entries from BCD with backup"""
+        # Confirm with user
+        reply = QtWidgets.QMessageBox.question(
+            self,
+            translator.t('messages.bcd_cleanup.confirm_title'),
+            translator.t('messages.bcd_cleanup.confirm_message'),
+            QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No,
+            QtWidgets.QMessageBox.StandardButton.No
+        )
+        
+        if reply != QtWidgets.QMessageBox.StandardButton.Yes:
+            return
+        
+        # Disable buttons
+        self.set_buttons_enabled(False)
+        
+        # Update footer
+        if hasattr(self, 'footer_label'):
+            self.footer_label.setText(translator.t('messages.bcd_cleanup.in_progress'))
+        if hasattr(self, 'footer_progress'):
+            self.footer_progress.setRange(0, 0)  # Indeterminate
+        
+        # Start cleanup thread
+        logger.info("Starting BCD cleanup")
+        self.bcd_cleanup_thread = BCDCleanupThread()
+        self.bcd_cleanup_thread.finished.connect(self.on_bcd_cleanup_finished)
+        self.bcd_cleanup_thread.start()
+    
+    def on_bcd_cleanup_finished(self, success, message):
+        """Called when BCD cleanup finishes"""
+        # Re-enable buttons
+        self.set_buttons_enabled(True)
+        
+        # Update footer
+        if hasattr(self, 'footer_label'):
+            self.footer_label.setText(translator.t('messages.bcd_cleanup.complete') if success else translator.t('messages.bcd_cleanup.failed'))
+        if hasattr(self, 'footer_progress'):
+            self.footer_progress.setRange(0, 1000)
+            self.footer_progress.setValue(1000 if success else 0)
+        
+        if success:
+            QtWidgets.QMessageBox.information(
+                self,
+                translator.t('messages.bcd_cleanup.title'),
+                message
+            )
+        else:
+            QtWidgets.QMessageBox.critical(
+                self,
+                translator.t('messages.bcd_cleanup.title'),
+                message
+            )
+        
+        # Reset footer after delay
+        QtCore.QTimer.singleShot(3000, self.reset_footer)
+
     def page_about(self):
         w = QtWidgets.QWidget()
         layout = QtWidgets.QVBoxLayout(w)
@@ -4356,7 +5127,7 @@ class MainWindow(QtWidgets.QWidget):
             api_url = "https://api.github.com/repos/RetroGameSets/PSA-DIAG/releases?per_page=10"
             
             logger.info(f"[STEP 3] -- Fetching changelog for last 10 releases")
-            response = requests.get(api_url, timeout=5)
+            response = requests.get(api_url, timeout=15)
             
             if response.status_code == 200:
                 releases = response.json()
@@ -4429,12 +5200,15 @@ class MainWindow(QtWidgets.QWidget):
                 self.changelog_text.setPlainText(f"Failed to load changelog (HTTP {response.status_code})")
                 logger.warning(f"Failed to fetch changelog: HTTP {response.status_code}")
                 
-        except requests.exceptions.RequestException:
-            logger.warning("Unable to load changelog. Please check your network connection.")
+        except requests.exceptions.RequestException as e:
+            logger.warning(f"Unable to load changelog: {type(e).__name__}: {str(e)}")
             self.changelog_text.setPlainText("Unable to load changelog.\n\nPlease check your network connection and try again.")
         except Exception as e:
-            logger.error(f"Error loading changelog: {e}")
+            logger.error(f"Error loading changelog: {type(e).__name__}: {e}")
             self.changelog_text.setPlainText(f"Error loading changelog:\n{str(e)}")
+        finally:
+            # Close splash screen once all loading is done
+            QtCore.QTimer.singleShot(100, self._close_splash_screen)
     
     def open_logs(self):
         """Open the logs folder and select the most recent log file if present."""
@@ -4510,7 +5284,33 @@ class MainWindow(QtWidgets.QWidget):
             event.accept()
     
     def closeEvent(self, event):
-        """Handle application close - stop any running processes"""
+        """Clean up resources before closing"""
+        # Kill any running aria2c processes
+        try:
+            for proc in psutil.process_iter(['pid', 'name']):
+                try:
+                    if proc.info['name'] and proc.info['name'].lower() == 'aria2c.exe':
+                        logger.info(f"Terminating aria2c.exe (PID: {proc.pid})")
+                        proc.kill()
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    pass
+        except Exception as e:
+            logger.error(f"Error killing aria2c processes: {e}")
+        
+        # Cancel any running download threads
+        if hasattr(self, 'vhdx_download_thread') and self.vhdx_download_thread:
+            if self.vhdx_download_thread.isRunning():
+                logger.info("Cancelling VHDX download thread")
+                self.vhdx_download_thread.cancel()
+                self.vhdx_download_thread.wait(2000)
+        
+        if hasattr(self, 'download_thread') and self.download_thread:
+            if self.download_thread.isRunning():
+                logger.info("Cancelling download thread")
+                self.download_thread.cancel()
+                self.download_thread.wait(2000)
+        
+        event.accept()
         # Stop download thread if running
         if self.download_thread and self.download_thread.isRunning():
             self.download_thread.cancel()
@@ -4559,6 +5359,11 @@ if __name__ == "__main__":
     if icon_path.exists():
         app.setWindowIcon(QtGui.QIcon(str(icon_path)))
     
-    win = MainWindow()
+    # Show splash screen during initialization
+    splash = SplashScreen()
+    splash.show()
+    app.processEvents()  # Process events to display the splash screen
+    
+    win = MainWindow(splash=splash)  # Pass splash screen reference to MainWindow
     win.show()
     sys.exit(app.exec())

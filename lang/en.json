@@ -30,7 +30,8 @@
     "open_log": "Open Logs",
     "dismiss": "Dismiss",
     "install_runtimes": "Install runtimes",
-    "defender_rules": "Defender Rules"
+    "defender_rules": "Defender Rules",
+    "remove_bcd_entries": "Remove PSA-DIAG BCD Entries"
   },
   "labels": {
     "installed_version": "Installed Version : {version}",
@@ -185,6 +186,20 @@
       "continue": "Do you want to continue anyway?"
     },
     "page_update": "Update / Refresh (Not available)"
+     },
+    "bcd_cleanup": {
+      "title": "BCD Cleanup",
+      "confirm_title": "Confirm Removal",
+      "confirm_message": "Are you sure you want to remove all PSA-DIAG entries from BCD?\n\nA backup will be created automatically before removal.\n\nYou can restore the BCD from the backup if needed.",
+      "in_progress": "BCD cleanup in progress...",
+      "complete": "BCD cleanup complete",
+      "failed": "BCD cleanup failed",
+      "no_entries": "No PSA-DIAG entries found in BCD.\n\nBackup created: {backup}",
+      "success": "{count} PSA-DIAG entry(ies) successfully removed.\n\nBackup created: {backup}\n\nTo restore, use the command:\nbcdedit /import {backup}",
+      "success_generic": "BCD cleanup completed successfully."
+    },
+  "tooltips": {
+    "remove_bcd_entries": "Removes all PSA-DIAG entries from BCD (automatic backup created)"
   },
   "vhd": {
     "download": {
@@ -205,7 +220,16 @@
       "download_size": "DOWNLOAD SIZE",
       "download_size_with_space": "Download Size: {size} GB\nSpace required to download and install: 50 GB",
       "download_size_default": "DOWNLOAD SIZE\nSpace required to download and install: 50 GB",
-      "destination_disk": "Destination Disk:"
+      "destination_disk": "Destination Disk:",
+      "download_server": "Download Server:"
+    },
+    "servers": {
+      "server1": "Server 1 (Direct)",
+      "server2": "Server 2 (Torrent - Fastest)"
+    },
+    "errors": {
+      "aria2c_not_found": "aria2c not found. Download it from https://github.com/aria2/aria2/releases\nOr place aria2c.exe in the tools/ folder",
+      "torrent_download_failed": "Torrent download failed"
     }
   },
   "languages": {

@@ -30,7 +30,8 @@
     "open_log": "Ouvrir les logs",
     "dismiss": "Fermer",
     "install_runtimes": "Installer les runtimes",
-    "defender_rules": "Règles Defender"
+    "defender_rules": "Règles Defender",
+    "remove_bcd_entries": "Supprimer les entrées BCD PSA-DIAG"
   },
   "labels": {
     "installed_version": "Version Installée : {version}",
@@ -184,7 +185,21 @@
       "solution_storage": "Nettoyer le disque C: en supprimant les fichiers inutiles, vider la corbeille, ou désinstaller des programmes",
       "continue": "Voulez-vous continuer malgré tout ?"
     },
+    "bcd_cleanup": {
+      "title": "Nettoyage BCD",
+      "confirm_title": "Confirmer la suppression",
+      "confirm_message": "Êtes-vous sûr de vouloir supprimer toutes les entrées PSA-DIAG du BCD ?\n\nUne sauvegarde sera créée automatiquement avant la suppression.\n\nVous pourrez restaurer le BCD depuis la sauvegarde si nécessaire.",
+      "in_progress": "Nettoyage BCD en cours...",
+      "complete": "Nettoyage BCD terminé",
+      "failed": "Échec du nettoyage BCD",
+      "no_entries": "Aucune entrée PSA-DIAG trouvée dans le BCD.\n\nSauvegarde créée : {backup}",
+      "success": "{count} entrée(s) PSA-DIAG supprimée(s) avec succès.\n\nSauvegarde créée : {backup}\n\nPour restaurer, utilisez la commande :\nbcdedit /import {backup}",
+      "success_generic": "Nettoyage BCD terminé avec succès."
+    },
     "page_update": "Mise à jour / Actualiser (Non disponible)"
+  },
+  "tooltips": {
+    "remove_bcd_entries": "Supprime toutes les entrées PSA-DIAG du BCD (sauvegarde automatique créée)"
   },
   "vhd": {
     "download": {
@@ -205,7 +220,16 @@
       "download_size": "TAILLE TÉLÉCHARGEMENT",
       "download_size_with_space": "Taille du Téléchargement : {size} GO\nEspace nécessaire pour télécharger et installer : 50 GO",
       "download_size_default": "TAILLE TÉLÉCHARGEMENT\nEspace nécessaire pour télécharger et installer : 50 GO",
-      "destination_disk": "Disque de Destination :"
+      "destination_disk": "Disque de Destination :",
+      "download_server": "Serveur de téléchargement :"
+    },
+    "servers": {
+      "server1": "Serveur 1 (Direct)",
+      "server2": "Serveur 2 (Torrent - Plus rapide)"
+    },
+    "errors": {
+      "aria2c_not_found": "aria2c non trouvé. Téléchargez-le depuis https://github.com/aria2/aria2/releases\nOu placez aria2c.exe dans le dossier tools/",
+      "torrent_download_failed": "Échec du téléchargement torrent"
     }
   },
   "languages": {

@@ -24,6 +24,7 @@ datas_list = [
     ('style.qss', '.'),
     ('icons/*.svg', 'icons'),
     ('icons/*.png', 'icons'),
+    ('icons/*.ico', 'icons'),
     ('tools/*.exe', 'tools'),
     ('tools/*.dll', 'tools'),
     ('lang/*.json', 'lang'),

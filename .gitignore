@@ -2,6 +2,7 @@ dist/*
 build/*
 logs/*
 .vscode/*
+.venv/*
 __pycache__/*
 build.ps1
 tools/create_diagbox_archive.ps1
