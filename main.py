@@ -3456,9 +3456,33 @@ class MainWindow(QtWidgets.QWidget):
         wait for this process to exit, replace the running exe, and optionally restart it.
         """
         try:
+            # Create a session with retry strategy for robust downloads
+            from requests.adapters import HTTPAdapter
+            from urllib3.util.retry import Retry
+            
+            # Use proper headers to avoid GitHub blocking
+            headers = {
+                'User-Agent': 'PSA-DIAG/2.3.1.0'
+            }
+            
+            session = requests.Session()
+            session.headers.update(headers)
+            
+            # More aggressive retry strategy for GitHub downloads
+            retry_strategy = Retry(
+                total=5,  # More retries for large files
+                backoff_factor=2,  # Wait 2, 4, 8, 16 seconds between retries
+                status_forcelist=[429, 500, 502, 503, 504],
+                allowed_methods=["GET"],
+                raise_on_status=False  # Don't raise on status code, we'll handle it
+            )
+            adapter = HTTPAdapter(max_retries=retry_strategy, pool_connections=1, pool_maxsize=1)
+            session.mount("https://", adapter)
+            session.mount("http://", adapter)
+            
             api_url = "https://api.github.com/repos/RetroGameSets/PSA-DIAG/releases/latest"
-            logger.info(f"Querying GitHub API for latest release: {api_url}")
-            r = requests.get(api_url, timeout=10)
+            logger.debug(f"Querying GitHub API for latest release: {api_url}")
+            r = session.get(api_url, timeout=15)
             r.raise_for_status()
             release = r.json()
 
@@ -3492,16 +3516,47 @@ class MainWindow(QtWidgets.QWidget):
             except Exception as e:
                 logger.warning(f"Failed to remove previous download {download_path}: {e}")
 
-            # Download with progress (simple)
-            logger.info(f"Downloading update asset: {download_url} -> {download_path}")
-            with requests.get(download_url, stream=True, timeout=30) as resp:
-                resp.raise_for_status()
-                with open(download_path, 'wb') as f:
-                    for chunk in resp.iter_content(chunk_size=8192):
-                        if chunk:
-                            f.write(chunk)
-
-            logger.info(f"Download complete: {download_path}")
+            # Download with progress and robust streaming
+            logger.debug(f"Downloading update asset: {download_url} -> {download_path}")
+            logger.info(f"Download size: {exe_asset.get('size', 'unknown')} bytes")
+            
+            # Use increased timeout and smaller chunks for stability
+            downloaded_bytes = 0
+            # Headers specific to the file download (not for API calls)
+            download_headers = {
+                'User-Agent': 'PSA-DIAG/2.3.1.0',
+                'Accept': 'application/octet-stream'
+            }
+            
+            try:
+                with session.get(download_url, stream=True, timeout=120, headers=download_headers, verify=True) as resp:
+                    resp.raise_for_status()
+                    total_size = int(resp.headers.get('content-length', 0))
+                    
+                    with open(download_path, 'wb') as f:
+                        # Download in smaller chunks with reasonable buffer size
+                        for chunk in resp.iter_content(chunk_size=32768):  # 32KB chunks
+                            if chunk:
+                                f.write(chunk)
+                                downloaded_bytes += len(chunk)
+                                if total_size > 0:
+                                    percent = (downloaded_bytes / total_size) * 100
+                                    logger.debug(f"Download progress: {percent:.1f}% ({downloaded_bytes}/{total_size} bytes)")
+            except requests.exceptions.ChunkedEncodingError as e:
+                logger.error(f"Chunked encoding error during download: {e}. Downloaded {downloaded_bytes} bytes so far.")
+                # Check if we have at least some data
+                if os.path.exists(download_path) and os.path.getsize(download_path) > 1024 * 1024:  # At least 1MB
+                    logger.warning("Partial download detected but size is reasonable, attempting to continue")
+                else:
+                    raise
+            
+            if os.path.exists(download_path):
+                file_size = os.path.getsize(download_path)
+                logger.info(f"Download complete: {download_path} ({file_size} bytes)")
+            else:
+                raise FileNotFoundError(f"Downloaded file not found: {download_path}")
+                
+            session.close()
 
             # Launch updater helper and exit
             updater_script = BASE / 'updater.py'

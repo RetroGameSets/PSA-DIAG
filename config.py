@@ -4,7 +4,7 @@ import os
 CONFIG_DIR = Path(os.getenv('APPDATA', Path.home())) / 'PSA_DIAG'
 
 # Application version (keep in sync with release tags)
-APP_VERSION = "2.3.1.0"
+APP_VERSION = "2.3.1.1"
 
 # Archive extraction password used by main.py (kept empty by default)
 ARCHIVE_PASSWORD = ""
