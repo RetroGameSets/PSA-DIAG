@@ -26,7 +26,7 @@ else:
     BASE = Path(__file__).resolve().parent
 
 # Centralized configuration (moved to `config.py`)
-from config import CONFIG_DIR, APP_VERSION, URL_LAST_VERSION_PSADIAG, URL_LAST_VERSION_DIAGBOX, URL_VERSION_OPTIONS, URL_REMOTE_MESSAGES, ARCHIVE_PASSWORD, URL_VHD_DOWNLOAD, URL_VHD_TORRENT
+from config import CONFIG_DIR, APP_VERSION, URL_LAST_VERSION_PSADIAG, URL_VERSION_OPTIONS, URL_REMOTE_MESSAGES, ARCHIVE_PASSWORD, URL_VHD_DOWNLOAD, URL_VHD_TORRENT
 
 # Translation system
 class Translator:
@@ -724,7 +724,7 @@ class TorrentDownloadThread(QtCore.QThread):
             os.makedirs(vhd_folder, exist_ok=True)
             logger.info(f"VHD folder created/verified: {vhd_folder}")
             
-            logger.info(f"Starting torrent download from: {self.torrent_url}")
+            logger.info(f"Starting torrent download")
             logger.info(f"Target file: {self.target_file}")
             logger.info(f"Destination: {vhd_folder}")
             
@@ -1091,6 +1091,31 @@ $VHD = '{vhd_bcd_format}'
 $description = '{self.description}'
 
 try {{
+    # === BACKUP BCD BEFORE ANY MODIFICATIONS ===
+    $backupDir = "$env:SystemDrive\\PSA-DIAG_BCD_Backup"
+    if (-not (Test-Path $backupDir)) {{
+        New-Item -ItemType Directory -Path $backupDir -Force | Out-Null
+    }}
+    $timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
+    $backupFile = "$backupDir\\BCD_Backup_$timestamp.bak"
+    
+    Write-Host "Creating BCD backup: $backupFile"
+    bcdedit /export $backupFile
+    if ($LASTEXITCODE -eq 0) {{
+        Write-Host "BCD backup created successfully: $backupFile"
+        Write-Host "To restore if needed: bcdedit /import `"$backupFile`""
+    }} else {{
+        Write-Host "Warning: Failed to create BCD backup (continuing anyway)"
+    }}
+    
+    # Store the current default boot entry BEFORE making any changes
+    $currentDefault = bcdedit /enum {{bootmgr}} | Select-String -Pattern "default\\s+{{([a-fA-F0-9-]+)}}"
+    $originalDefaultCLSID = $null
+    if ($currentDefault -match '{{([a-fA-F0-9-]+)}}') {{
+        $originalDefaultCLSID = "{{$($matches[1])}}"
+        Write-Host "Original default boot entry: $originalDefaultCLSID"
+    }}
+    
     # Check if an entry with this description already exists
     $existingEntries = bcdedit /enum | Select-String -Pattern "description\\s+$description"
     
@@ -1153,8 +1178,55 @@ try {{
         throw "Failed to enable detecthal (exit code: $LASTEXITCODE)"
     }}
     
+    # === CRITICAL: Configure boot menu to show options ===
+    
+    # 1. Ensure boot menu is displayed
+    bcdedit /set {{bootmgr}} displaybootmenu yes
+    if ($LASTEXITCODE -ne 0) {{
+        Write-Host "Warning: Failed to enable boot menu display"
+    }} else {{
+        Write-Host "Boot menu display enabled"
+    }}
+    
+    # 2. Set timeout to 5 seconds for boot menu
+    bcdedit /timeout 5
+    if ($LASTEXITCODE -ne 0) {{
+        Write-Host "Warning: Failed to set boot timeout"
+    }} else {{
+        Write-Host "Boot timeout set to 5 seconds"
+    }}
+    
+    # 3. Add the new entry to the display order (appended, not first)
+    bcdedit /displayorder $CLSID /addlast
+    if ($LASTEXITCODE -ne 0) {{
+        Write-Host "Warning: Failed to add entry to display order"
+    }} else {{
+        Write-Host "Entry added to boot menu display order"
+    }}
+    
+    # 4. CRITICAL: Restore original Windows as the default boot entry
+    if ($originalDefaultCLSID) {{
+        bcdedit /default $originalDefaultCLSID
+        if ($LASTEXITCODE -ne 0) {{
+            Write-Host "Warning: Failed to restore original default boot entry"
+        }} else {{
+            Write-Host "Original Windows boot entry restored as default: $originalDefaultCLSID"
+        }}
+    }}
+    
+    # 5. CRITICAL: Disable Fast Startup to ensure boot menu is always shown
+    # Fast Startup causes Windows to skip the boot menu on "shutdown" (it's actually hibernate)
+    Write-Host "Disabling Fast Startup to ensure boot menu is always displayed..."
+    powercfg /hibernate off
+    if ($LASTEXITCODE -ne 0) {{
+        Write-Host "Warning: Failed to disable hibernate/Fast Startup"
+    }} else {{
+        Write-Host "Fast Startup disabled successfully"
+    }}
+    
     Write-Host "BCD configuration completed successfully"
     Write-Host "CLSID: $CLSID"
+    Write-Host "Boot menu will now show both Windows and $description"
     exit 0
 }} catch {{
     Write-Error $_.Exception.Message
