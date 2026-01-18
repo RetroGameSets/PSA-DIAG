@@ -1181,7 +1181,7 @@ try {{
     # === CRITICAL: Configure boot menu to show options ===
     
     # 1. Ensure boot menu is displayed
-    bcdedit /set {{bootmgr}} displaybootmenu yes
+    bcdedit /set '{{bootmgr}}' displaybootmenu yes
     if ($LASTEXITCODE -ne 0) {{
         Write-Host "Warning: Failed to enable boot menu display"
     }} else {{
