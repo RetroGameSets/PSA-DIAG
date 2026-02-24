@@ -42,6 +42,11 @@ else:
     if os.path.isfile(updater_exe_dist):
         datas_list.append((updater_exe_dist, 'tools'))
 
+# Include onedir updater folder if available (updater.exe + _internal)
+updater_dir = os.path.join('tools', 'updater')
+if os.path.isdir(updater_dir) and Tree is not None:
+    datas_list += Tree(updater_dir, prefix='tools/updater')
+
 datas = datas_list + _pyside6_datas
 
 a = Analysis(

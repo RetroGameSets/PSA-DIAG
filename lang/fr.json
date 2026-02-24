@@ -31,7 +31,7 @@
     "dismiss": "Fermer",
     "install_runtimes": "Installer les runtimes",
     "defender_rules": "Règles Defender",
-    "remove_bcd_entries": "Supprimer les entrées BCD PSA-DIAG"
+    "remove_bcd_entries": "Supprimer PSA-DIAG du démarrage"
   },
   "labels": {
     "installed_version": "Version Installée : {version}",

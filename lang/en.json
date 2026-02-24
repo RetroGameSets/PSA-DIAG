@@ -31,7 +31,7 @@
     "dismiss": "Dismiss",
     "install_runtimes": "Install runtimes",
     "defender_rules": "Defender Rules",
-    "remove_bcd_entries": "Remove PSA-DIAG BCD Entries"
+    "remove_bcd_entries": "Remove PSA-DIAG from boot"
   },
   "labels": {
     "installed_version": "Installed Version : {version}",

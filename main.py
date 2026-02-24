@@ -1060,73 +1060,49 @@ class TorrentDownloadThread(QtCore.QThread):
 class VHDXInstallThread(QtCore.QThread):
     """Thread for installing VHDX with BCD configuration"""
     finished = QtCore.Signal(bool, str)  # success, message
-    
+
     def __init__(self, vhdx_path, description="PSA-DIAG"):
         super().__init__()
         self.vhdx_path = vhdx_path
         self.description = description
-    
+
     def run(self):
         try:
             logger.info(f"Starting VHDX installation: {self.vhdx_path}")
             logger.info(f"Boot description: {self.description}")
-            
+
             # Verify VHDX file exists
             if not os.path.exists(self.vhdx_path):
                 error_msg = f"VHDX file not found: {self.vhdx_path}"
                 logger.error(error_msg)
                 self.finished.emit(False, error_msg)
                 return
-            
+
             # Extract relative path for BCD format
-            # BCD expects: vhd=[locate]path format, e.g., vhd=[locate]\VHD\PSA-DIAG.vhdx
+            # BCD expects: vhd=[drive:]\path format, e.g., vhd=[E:]\VHD\PSA-DIAG.vhdx
+            drive_letter = os.path.splitdrive(self.vhdx_path)[0]  # e.g., "E:"
             vhd_path_relative = os.path.splitdrive(self.vhdx_path)[1]  # e.g., "\VHD\PSA-DIAG.vhdx"
-            vhd_bcd_format = f"[locate]{vhd_path_relative}"
-            
+            vhd_bcd_format = f"[{drive_letter}]{vhd_path_relative}"
+
             logger.info(f"BCD VHD format: vhd={vhd_bcd_format}")
-            
+
             # PowerShell script to configure BCD
             ps_script = f"""
 $VHD = '{vhd_bcd_format}'
 $description = '{self.description}'
 
 try {{
-    # === BACKUP BCD BEFORE ANY MODIFICATIONS ===
-    $backupDir = "$env:SystemDrive\\PSA-DIAG_BCD_Backup"
-    if (-not (Test-Path $backupDir)) {{
-        New-Item -ItemType Directory -Path $backupDir -Force | Out-Null
-    }}
-    $timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
-    $backupFile = "$backupDir\\BCD_Backup_$timestamp.bak"
-    
-    Write-Host "Creating BCD backup: $backupFile"
-    bcdedit /export $backupFile
-    if ($LASTEXITCODE -eq 0) {{
-        Write-Host "BCD backup created successfully: $backupFile"
-        Write-Host "To restore if needed: bcdedit /import `"$backupFile`""
-    }} else {{
-        Write-Host "Warning: Failed to create BCD backup (continuing anyway)"
-    }}
-    
-    # Store the current default boot entry BEFORE making any changes
-    $currentDefault = bcdedit /enum {{bootmgr}} | Select-String -Pattern "default\\s+{{([a-fA-F0-9-]+)}}"
-    $originalDefaultCLSID = $null
-    if ($currentDefault -match '{{([a-fA-F0-9-]+)}}') {{
-        $originalDefaultCLSID = "{{$($matches[1])}}"
-        Write-Host "Original default boot entry: $originalDefaultCLSID"
-    }}
-    
     # Check if an entry with this description already exists
     $existingEntries = bcdedit /enum | Select-String -Pattern "description\\s+$description"
-    
+
     if ($existingEntries) {{
         Write-Host "Boot entry '$description' already exists."
-        
+
         # Extract CLSID from the existing entry
         $beforeDescription = bcdedit /enum | Select-String -Pattern "identificateur" -Context 0,10 | Where-Object {{
             $_.Context.PostContext -match "description\\s+$description"
         }}
-        
+
         if ($beforeDescription -match '{{([a-fA-F0-9-]+)}}') {{
             $existingCLSID = "{{$($matches[1])}}"
             Write-Host "Existing CLSID found: $existingCLSID"
@@ -1138,104 +1114,57 @@ try {{
             Write-Host "Old entry deleted successfully"
         }}
     }}
-    
+
     # Copy current boot entry
     $BootEntryCopy = bcdedit /copy '{{current}}' /d $description
     if ($LASTEXITCODE -ne 0) {{
         throw "Failed to copy boot entry (exit code: $LASTEXITCODE)"
     }}
-    
+
     # Extract CLSID from output using regex
     if ($BootEntryCopy -match '{{([a-fA-F0-9-]+)}}') {{
         $CLSID = "{{$($matches[1])}}"
     }} else {{
         throw "Failed to extract CLSID from bcdedit output"
     }}
-    
+
     Write-Host "Boot entry created: $CLSID"
-    
+
     # Set device to VHD
-    $result1 = bcdedit /set $CLSID device vhd=$VHD
+    $result1 = bcdedit /set $CLSID device "vhd=$VHD"
     if ($LASTEXITCODE -ne 0) {{
         throw "Failed to set device (exit code: $LASTEXITCODE)"
     }}
-    
+
     # Set osdevice to VHD
-    $result2 = bcdedit /set $CLSID osdevice vhd=$VHD
+    $result2 = bcdedit /set $CLSID osdevice "vhd=$VHD"
     if ($LASTEXITCODE -ne 0) {{
         throw "Failed to set osdevice (exit code: $LASTEXITCODE)"
     }}
-    
+
     # Set locale to fr-FR
     $result4 = bcdedit /set $CLSID locale fr-FR
     if ($LASTEXITCODE -ne 0) {{
         Write-Host "Warning: Failed to set locale (exit code: $LASTEXITCODE)"
     }}
-    
+
     # Enable HAL detection
     $result5 = bcdedit /set $CLSID detecthal on
     if ($LASTEXITCODE -ne 0) {{
         throw "Failed to enable detecthal (exit code: $LASTEXITCODE)"
     }}
-    
-    # === CRITICAL: Configure boot menu to show options ===
-    
-    # 1. Ensure boot menu is displayed
-    bcdedit /set '{{bootmgr}}' displaybootmenu yes
-    if ($LASTEXITCODE -ne 0) {{
-        Write-Host "Warning: Failed to enable boot menu display"
-    }} else {{
-        Write-Host "Boot menu display enabled"
-    }}
-    
-    # 2. Set timeout to 5 seconds for boot menu
-    bcdedit /timeout 5
-    if ($LASTEXITCODE -ne 0) {{
-        Write-Host "Warning: Failed to set boot timeout"
-    }} else {{
-        Write-Host "Boot timeout set to 5 seconds"
-    }}
-    
-    # 3. Add the new entry to the display order (appended, not first)
-    bcdedit /displayorder $CLSID /addlast
-    if ($LASTEXITCODE -ne 0) {{
-        Write-Host "Warning: Failed to add entry to display order"
-    }} else {{
-        Write-Host "Entry added to boot menu display order"
-    }}
-    
-    # 4. CRITICAL: Restore original Windows as the default boot entry
-    if ($originalDefaultCLSID) {{
-        bcdedit /default $originalDefaultCLSID
-        if ($LASTEXITCODE -ne 0) {{
-            Write-Host "Warning: Failed to restore original default boot entry"
-        }} else {{
-            Write-Host "Original Windows boot entry restored as default: $originalDefaultCLSID"
-        }}
-    }}
-    
-    # 5. CRITICAL: Disable Fast Startup to ensure boot menu is always shown
-    # Fast Startup causes Windows to skip the boot menu on "shutdown" (it's actually hibernate)
-    Write-Host "Disabling Fast Startup to ensure boot menu is always displayed..."
-    powercfg /hibernate off
-    if ($LASTEXITCODE -ne 0) {{
-        Write-Host "Warning: Failed to disable hibernate/Fast Startup"
-    }} else {{
-        Write-Host "Fast Startup disabled successfully"
-    }}
-    
+
     Write-Host "BCD configuration completed successfully"
     Write-Host "CLSID: $CLSID"
-    Write-Host "Boot menu will now show both Windows and $description"
     exit 0
 }} catch {{
     Write-Error $_.Exception.Message
     exit 1
 }}
 """
-            
+
             logger.info("Executing PowerShell BCD configuration script")
-            
+
             # Execute PowerShell script
             proc = subprocess.run(
                 ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", ps_script],
@@ -1243,16 +1172,16 @@ try {{
                 text=True,
                 creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
             )
-            
+
             stdout = (proc.stdout or '').strip()
             stderr = (proc.stderr or '').strip()
-            
+
             logger.info(f"PowerShell exit code: {proc.returncode}")
             if stdout:
                 logger.info(f"PowerShell stdout: {stdout}")
             if stderr:
                 logger.warning(f"PowerShell stderr: {stderr}")
-            
+
             if proc.returncode == 0:
                 success_msg = (
                     f"VHDX installation successful!\n\n"
@@ -1265,7 +1194,7 @@ try {{
                 error_msg = f"BCD configuration failed.\n\n{stderr if stderr else 'Unknown error'}"
                 logger.error(f"VHDX installation failed: {error_msg}")
                 self.finished.emit(False, error_msg)
-                
+
         except Exception as e:
             error_msg = f"Installation error: {str(e)}"
             logger.error(f"VHDX installation exception: {e}", exc_info=True)
@@ -3553,7 +3482,7 @@ class MainWindow(QtWidgets.QWidget):
             session.mount("http://", adapter)
             
             api_url = "https://api.github.com/repos/RetroGameSets/PSA-DIAG/releases/latest"
-            logger.debug(f"Querying GitHub API for latest release: {api_url}")
+            logger.debug(f"Querying GitHub API for latest release")
             r = session.get(api_url, timeout=15)
             r.raise_for_status()
             release = r.json()
@@ -3589,7 +3518,7 @@ class MainWindow(QtWidgets.QWidget):
                 logger.warning(f"Failed to remove previous download {download_path}: {e}")
 
             # Download with progress and robust streaming
-            logger.debug(f"Downloading update asset: {download_url} -> {download_path}")
+            logger.debug(f"Downloading update asset: -> {download_path}")
             logger.info(f"Download size: {exe_asset.get('size', 'unknown')} bytes")
             
             # Use increased timeout and smaller chunks for stability
@@ -3648,44 +3577,85 @@ class MainWindow(QtWidgets.QWidget):
             creationflags = subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
 
             try:
+                launch_cmds = []
                 if getattr(sys, 'frozen', False):
                     # When frozen, BASE points to a temp _MEIPASS folder that gets cleaned up.
-                    # Copy the bundled updater to a persistent location (CONFIG_DIR) before invoking it.
-                    # Priority: standalone updater.exe in tools/, then onedir updater/updater.exe
+                    # Copy the bundled updater to a persistent location before invoking it.
+                    # Some Windows policies block execution from Roaming/AppData, so we
+                    # stage and try multiple locations.
                     bundled_updater_standalone = BASE / 'tools' / 'updater.exe'
                     bundled_updater_dir = BASE / 'tools' / 'updater' / 'updater.exe'
-                    persistent_updater = CONFIG_DIR / 'updater.exe'
-                    
-                    # Ensure CONFIG_DIR exists
-                    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-                    
-                    # Copy bundled updater to persistent location if found
+                    local_appdata = Path(os.getenv('LOCALAPPDATA', '')) if os.getenv('LOCALAPPDATA') else None
+                    temp_dir = Path(os.getenv('TEMP', str(CONFIG_DIR / 'temp')))
+
+                    candidate_dirs = []
+                    if local_appdata:
+                        candidate_dirs.append(local_appdata / 'PSA_DIAG')
+                    candidate_dirs.append(temp_dir / 'PSA_DIAG')
+                    candidate_dirs.append(CONFIG_DIR)
+
+                    # Prefer standalone updater when available.
                     if bundled_updater_standalone.exists():
-                        logger.info(f"Copying standalone updater from {bundled_updater_standalone} to {persistent_updater}")
-                        shutil.copy2(bundled_updater_standalone, persistent_updater)
+                        updater_file_name = f"updater_{os.getpid()}.exe"
+                        for candidate_dir in candidate_dirs:
+                            try:
+                                candidate_dir.mkdir(parents=True, exist_ok=True)
+                                staged_updater = candidate_dir / updater_file_name
+                                logger.info(f"Copying standalone updater from {bundled_updater_standalone} to {staged_updater}")
+                                shutil.copyfile(bundled_updater_standalone, staged_updater)
+                                launch_cmds.append([
+                                    str(staged_updater), '--target', str(current_exe), '--new', str(download_path),
+                                    '--wait-pid', str(os.getpid()), '--restart'
+                                ])
+                            except Exception as copy_err:
+                                logger.warning(f"Failed to stage standalone updater in {candidate_dir}: {copy_err}")
+
+                    # For onedir updater, copy full folder so _internal dependencies are present.
                     elif bundled_updater_dir.exists():
-                        logger.info(f"Copying onedir updater from {bundled_updater_dir} to {persistent_updater}")
-                        shutil.copy2(bundled_updater_dir, persistent_updater)
-                    
-                    # Use the persistent copy if it exists
-                    if persistent_updater.exists():
-                        cmd = [str(persistent_updater), '--target', str(current_exe), '--new', str(download_path), '--wait-pid', str(os.getpid()), '--restart']
-                    else:
-                        # Fallback: Try system python to run updater.py (best-effort)
-                        python_bin = shutil.which('python') or shutil.which('python3') or shutil.which('py')
-                        if python_bin:
-                            cmd = [python_bin, str(updater_script), '--target', str(current_exe), '--new', str(download_path), '--wait-pid', str(os.getpid()), '--restart']
-                        else:
-                            logger.error("No bundled updater and no python in PATH; cannot self-update from frozen exe")
-                            QtWidgets.QMessageBox.warning(self, translator.t('messages.update.title'), translator.t('messages.update.no_updater'))
-                            return
+                        bundled_updater_folder = bundled_updater_dir.parent
+                        staged_folder_name = f"updater_{os.getpid()}"
+                        for candidate_dir in candidate_dirs:
+                            try:
+                                candidate_dir.mkdir(parents=True, exist_ok=True)
+                                staged_folder = candidate_dir / staged_folder_name
+                                if staged_folder.exists():
+                                    shutil.rmtree(staged_folder, ignore_errors=True)
+                                logger.info(f"Copying updater folder from {bundled_updater_folder} to {staged_folder}")
+                                shutil.copytree(bundled_updater_folder, staged_folder)
+                                staged_updater = staged_folder / 'updater.exe'
+                                if staged_updater.exists():
+                                    launch_cmds.append([
+                                        str(staged_updater), '--target', str(current_exe), '--new', str(download_path),
+                                        '--wait-pid', str(os.getpid()), '--restart'
+                                    ])
+                                else:
+                                    logger.warning(f"Staged updater executable missing in {staged_folder}")
+                            except Exception as copy_err:
+                                logger.warning(f"Failed to stage updater folder in {candidate_dir}: {copy_err}")
+
+                    # Fallback: Try system python to run updater.py (best-effort)
+                    python_bin = shutil.which('python') or shutil.which('python3') or shutil.which('py')
+                    if python_bin:
+                        launch_cmds.append([
+                            python_bin, str(updater_script), '--target', str(current_exe), '--new', str(download_path),
+                            '--wait-pid', str(os.getpid()), '--restart'
+                        ])
+
+                    if not launch_cmds:
+                        logger.error("No bundled updater and no python in PATH; cannot self-update from frozen exe")
+                        QtWidgets.QMessageBox.warning(self, translator.t('messages.update.title'), translator.t('messages.update.no_updater'))
+                        return
                 else:
                     # Running from source/interpreter: use current python interpreter
-                    cmd = [sys.executable, str(updater_script), '--target', str(current_exe), '--new', str(download_path), '--wait-pid', str(os.getpid()), '--restart']
+                    launch_cmds = [[
+                        sys.executable, str(updater_script), '--target', str(current_exe), '--new', str(download_path),
+                        '--wait-pid', str(os.getpid()), '--restart'
+                    ]]
 
                 # Add timeout for handle release (reduced to 15s since process exits quickly)
-                cmd.extend(['--timeout', '15'])
-                logger.info(f"Launching updater helper: {cmd}")
+                for launch_cmd in launch_cmds:
+                    launch_cmd.extend(['--timeout', '15'])
+                logger.info(f"Updater launch candidates: {launch_cmds}")
                 
                 # Close the application FIRST to release all handles and temp folders
                 # before launching the updater (prevents temp folder deletion warnings)
@@ -3706,7 +3676,20 @@ class MainWindow(QtWidgets.QWidget):
                 # Launch updater with a small delay to ensure clean shutdown
                 # Ensure updater window is visible: do NOT use CREATE_NO_WINDOW for updater
                 creationflags_for_updater = 0
-                subprocess.Popen(cmd, creationflags=creationflags_for_updater)
+                launched = False
+                last_launch_error = None
+                for launch_cmd in launch_cmds:
+                    try:
+                        logger.info(f"Launching updater helper: {launch_cmd}")
+                        subprocess.Popen(launch_cmd, creationflags=creationflags_for_updater)
+                        launched = True
+                        break
+                    except Exception as launch_err:
+                        last_launch_error = launch_err
+                        logger.warning(f"Updater launch attempt failed for {launch_cmd[0]}: {launch_err}")
+
+                if not launched:
+                    raise last_launch_error if last_launch_error else RuntimeError("Updater launch failed")
                 
                 # Give subprocess time to start and PyInstaller time to finish cleanup
                 # This prevents the temp folder warning
