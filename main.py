@@ -3523,17 +3523,18 @@ class MainWindow(QtWidgets.QWidget):
             
             # Use increased timeout and smaller chunks for stability
             downloaded_bytes = 0
+            expected_size = int(exe_asset.get('size') or 0)
             # Headers specific to the file download (not for API calls)
             download_headers = {
                 'User-Agent': 'PSA-DIAG/2.3.1.0',
                 'Accept': 'application/octet-stream'
             }
-            
+
             try:
                 with session.get(download_url, stream=True, timeout=120, headers=download_headers, verify=True) as resp:
                     resp.raise_for_status()
                     total_size = int(resp.headers.get('content-length', 0))
-                    
+
                     with open(download_path, 'wb') as f:
                         # Download in smaller chunks with reasonable buffer size
                         for chunk in resp.iter_content(chunk_size=32768):  # 32KB chunks
@@ -3543,13 +3544,20 @@ class MainWindow(QtWidgets.QWidget):
                                 if total_size > 0:
                                     percent = (downloaded_bytes / total_size) * 100
                                     logger.debug(f"Download progress: {percent:.1f}% ({downloaded_bytes}/{total_size} bytes)")
-            except requests.exceptions.ChunkedEncodingError as e:
-                logger.error(f"Chunked encoding error during download: {e}. Downloaded {downloaded_bytes} bytes so far.")
-                # Check if we have at least some data
-                if os.path.exists(download_path) and os.path.getsize(download_path) > 1024 * 1024:  # At least 1MB
-                    logger.warning("Partial download detected but size is reasonable, attempting to continue")
-                else:
-                    raise
+
+                # Integrity checks: reject partial/corrupted downloads
+                file_size = os.path.getsize(download_path)
+                if total_size > 0 and file_size != total_size:
+                    raise IOError(f"Downloaded file size mismatch with Content-Length ({file_size} != {total_size})")
+                if expected_size > 0 and file_size != expected_size:
+                    raise IOError(f"Downloaded file size mismatch with GitHub asset size ({file_size} != {expected_size})")
+            except Exception:
+                try:
+                    if os.path.exists(download_path):
+                        os.remove(download_path)
+                except Exception:
+                    pass
+                raise
             
             if os.path.exists(download_path):
                 file_size = os.path.getsize(download_path)
