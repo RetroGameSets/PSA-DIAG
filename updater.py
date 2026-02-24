@@ -152,6 +152,9 @@ class UpdaterGUI:
         self.args = args
         self.root = None
         self.thread = None
+        self.log_widget = None
+        self.status_var = None
+        self.retry_btn = None
 
         if tk:
             # Minimal centered window
@@ -165,6 +168,7 @@ class UpdaterGUI:
             frame.pack(fill='both', expand=True)
 
             self.message_var = tk.StringVar(value="PSA-DIAG update in progress, please wait...")
+            self.status_var = self.message_var
             lbl = tk.Label(frame, textvariable=self.message_var, font=(None, 11))
             lbl.pack(pady=(0, 12))
 
@@ -205,17 +209,23 @@ class UpdaterGUI:
     def log(self, msg):
         if self.root:
             def append():
-                self.log_widget.configure(state='normal')
-                self.log_widget.insert('end', msg + '\n')
-                self.log_widget.see('end')
-                self.log_widget.configure(state='disabled')
+                if self.log_widget is not None:
+                    self.log_widget.configure(state='normal')
+                    self.log_widget.insert('end', msg + '\n')
+                    self.log_widget.see('end')
+                    self.log_widget.configure(state='disabled')
+                else:
+                    print(msg)
             self.root.after(0, append)
         else:
             print(msg)
 
     def status(self, msg):
         if self.root:
-            self.root.after(0, lambda: self.status_var.set(msg))
+            if self.status_var is not None:
+                self.root.after(0, lambda: self.status_var.set(msg))
+            else:
+                self.root.after(0, lambda: print(msg))
         else:
             print(msg)
 
@@ -335,9 +345,12 @@ class UpdaterGUI:
         except Exception as e:
             self.status('Error')
             self.log(f'Updater failed: {e}')
-            self.log('You can fix the problem and click Retry')
+            self.log('Update failed. Please close and retry the update from PSA-DIAG.')
             if self.root:
-                self.root.after(0, lambda: self.retry_btn.configure(state='normal'))
+                try:
+                    self.root.after(0, lambda: self.close_btn.configure(state='normal'))
+                except Exception:
+                    pass
             else:
                 print('Updater failed; exiting with code 2')
                 sys.exit(2)
