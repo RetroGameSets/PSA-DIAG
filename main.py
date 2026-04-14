@@ -18,12 +18,15 @@ import re
 import threading
 from datetime import datetime
 import json
+from urllib.parse import unquote, urlsplit
 
 # Determine base path for resources.
 if getattr(sys, 'frozen', False):
     BASE = Path(sys._MEIPASS)
 else:
     BASE = Path(__file__).resolve().parent
+
+PERSISTENT_DOWNLOAD_FOLDER = r"C:\INSTALL"
 
 # Centralized configuration (moved to `config.py`)
 from config import CONFIG_DIR, APP_VERSION, URL_LAST_VERSION_PSADIAG, URL_VERSION_OPTIONS, URL_REMOTE_MESSAGES, ARCHIVE_PASSWORD, URL_VHD_DOWNLOAD, URL_VHD_TORRENT
@@ -654,6 +657,156 @@ class VHDXDownloadThread(QtCore.QThread):
             self.finished.emit(False, f"Erreur: {str(e)}")
 
 
+def _parse_aria2_size_to_bytes(value):
+    value = (value or '').strip()
+    multipliers = {
+        'TiB': 1024 ** 4,
+        'GiB': 1024 ** 3,
+        'MiB': 1024 ** 2,
+        'KiB': 1024,
+        'B': 1,
+    }
+    for suffix, multiplier in multipliers.items():
+        if value.endswith(suffix):
+            try:
+                return float(value[:-len(suffix)].strip()) * multiplier
+            except ValueError:
+                return 0.0
+    return 0.0
+
+
+def _parse_aria2_speed_to_mb(speed_value):
+    speed_value = (speed_value or '').strip()
+    if not speed_value:
+        return 0.0
+    if speed_value.endswith('GiB'):
+        return float(speed_value[:-3].strip()) * 1024
+    if speed_value.endswith('MiB'):
+        return float(speed_value[:-3].strip())
+    if speed_value.endswith('KiB'):
+        return float(speed_value[:-3].strip()) / 1024
+    if speed_value.endswith('B'):
+        raw_value = speed_value[:-1].strip()
+        return float(raw_value) / (1024 * 1024) if raw_value else 0.0
+    return 0.0
+
+
+def _parse_aria2_status_line(line):
+    if not line.startswith('[#') or 'DL:' not in line:
+        return None
+
+    first_bracket_end = line.find(']')
+    if first_bracket_end <= 0:
+        return None
+
+    main_line = line[:first_bracket_end]
+    progress_pct = 0.0
+
+    pct_match = re.search(r'\((\d+(?:\.\d+)?)%\)', main_line)
+    if pct_match:
+        progress_pct = float(pct_match.group(1))
+
+    size_match = re.search(r'\s([^\s]+)/([^\s\(]+)(?:\(|\s|$)', main_line)
+    if size_match:
+        downloaded_bytes = _parse_aria2_size_to_bytes(size_match.group(1))
+        total_bytes = _parse_aria2_size_to_bytes(size_match.group(2))
+        if total_bytes > 0 and downloaded_bytes >= 0:
+            progress_pct = max(progress_pct, (downloaded_bytes / total_bytes) * 100)
+
+    cn_match = re.search(r'\bCN:(\d+)', main_line)
+    sd_match = re.search(r'\bSD:(\d+)', main_line)
+    dl_match = re.search(r'\bDL:([^\s\]]+)', main_line)
+    eta_match = re.search(r'\bETA:([^\s\]]+)', main_line)
+
+    peer_count = int(cn_match.group(1)) if cn_match else 0
+    seeder_count = int(sd_match.group(1)) if sd_match else 0
+    speed_raw = dl_match.group(1) if dl_match else '0B'
+    speed_mb = _parse_aria2_speed_to_mb(speed_raw)
+    eta_str = eta_match.group(1) if eta_match else '--:--'
+
+    progress = max(0, min(1000, int(progress_pct * 10)))
+    return {
+        'progress': progress,
+        'progress_pct': progress_pct,
+        'peer_count': peer_count,
+        'seeder_count': seeder_count,
+        'speed_mb': speed_mb,
+        'eta_str': eta_str,
+    }
+
+
+def _format_torrent_status_text(peer_count, seeder_count, speed_mb, eta_str, is_seeding=False):
+    if is_seeding:
+        return f"Seed en cours | Conn:{peer_count} | Seeders:{seeder_count}"
+
+    parts = [f"Conn:{peer_count}", f"Seeders:{seeder_count}"]
+    if speed_mb > 0:
+        parts.append(f"DL:{speed_mb:.2f} MB/s")
+    if eta_str and eta_str != '--:--':
+        parts.append(f"ETA:{eta_str}")
+    elif peer_count == 0:
+        parts.append('Recherche de pairs')
+    return " | ".join(parts)
+
+
+def _notify_torrent_payload_ready(thread, success_message):
+    if getattr(thread, 'download_completed_notified', False):
+        return
+
+    thread.download_completed_notified = True
+    thread.is_seeding = True
+    thread.last_status_text = _format_torrent_status_text(
+        getattr(thread, 'peer_count', 0),
+        getattr(thread, 'seeder_count', 0),
+        0.0,
+        '--:--',
+        True,
+    )
+    logger.info(f"{success_message} Le seed continue en arrière-plan tant que l'application reste ouverte.")
+    thread.progress.emit(1000, 0.0, thread.last_status_text)
+    thread.finished.emit(True, success_message)
+
+
+def _build_persistent_torrent_path(torrent_url, destination_folder, preferred_name=None):
+    destination_folder = destination_folder or PERSISTENT_DOWNLOAD_FOLDER
+    os.makedirs(destination_folder, exist_ok=True)
+
+    torrent_name = preferred_name
+    if not torrent_name:
+        parsed_path = urlsplit(torrent_url).path if torrent_url else ''
+        torrent_name = os.path.basename(unquote(parsed_path))
+
+    if not torrent_name:
+        torrent_name = 'download.torrent'
+
+    base_name, extension = os.path.splitext(torrent_name)
+    if extension.lower() != '.torrent':
+        torrent_name = f"{base_name or 'download'}.torrent"
+
+    return os.path.join(destination_folder, torrent_name)
+
+
+def _ensure_persistent_torrent_file(torrent_url, destination_folder, preferred_name=None):
+    torrent_file_path = _build_persistent_torrent_path(torrent_url, destination_folder, preferred_name)
+
+    try:
+        if os.path.exists(torrent_file_path) and os.path.getsize(torrent_file_path) > 0:
+            logger.info(f"Using local torrent file: {torrent_file_path}")
+            return torrent_file_path
+    except OSError:
+        pass
+
+    logger.info(f"Downloading .torrent file to: {torrent_file_path}")
+    torrent_response = requests.get(torrent_url, timeout=30)
+    torrent_response.raise_for_status()
+
+    with open(torrent_file_path, 'wb') as torrent_file:
+        torrent_file.write(torrent_response.content)
+
+    logger.info(f"Torrent file saved to: {torrent_file_path}")
+    return torrent_file_path
+
+
 class TorrentDownloadThread(QtCore.QThread):
     """Thread for downloading VHDX files via torrent"""
     finished = QtCore.Signal(bool, str)  # success, message
@@ -668,6 +821,11 @@ class TorrentDownloadThread(QtCore.QThread):
         self._is_cancelled = False
         self._is_paused = False
         self.process = None
+        self.is_seeding = False
+        self.peer_count = 0
+        self.seeder_count = 0
+        self.last_status_text = "Initialisation du torrent..."
+        self.download_completed_notified = False
         
     def cancel(self):
         """Cancel the download"""
@@ -716,8 +874,6 @@ class TorrentDownloadThread(QtCore.QThread):
         self._is_paused = False
     
     def run(self):
-        import tempfile
-        
         try:
             # Create VHD folder at root of selected drive
             vhd_folder = os.path.join(f"{self.destination_drive}:\\", "VHD")
@@ -728,17 +884,12 @@ class TorrentDownloadThread(QtCore.QThread):
             logger.info(f"Target file: {self.target_file}")
             logger.info(f"Destination: {vhd_folder}")
             
-            # Download torrent file
-            logger.info("Downloading .torrent file...")
-            torrent_response = requests.get(self.torrent_url, timeout=30)
-            torrent_response.raise_for_status()
-            
-            # Create temp file for torrent
-            with tempfile.NamedTemporaryFile(mode='wb', suffix='.torrent', delete=False) as temp_torrent:
-                temp_torrent.write(torrent_response.content)
-                torrent_file_path = temp_torrent.name
-            
-            logger.info(f"Torrent file saved to: {torrent_file_path}")
+            torrent_file_name = f"{Path(self.target_file).stem}.torrent"
+            torrent_file_path = _ensure_persistent_torrent_file(
+                self.torrent_url,
+                PERSISTENT_DOWNLOAD_FOLDER,
+                preferred_name=torrent_file_name,
+            )
             
             # Check for aria2c executable (bundled or system)
             aria2c_paths = [
@@ -759,7 +910,6 @@ class TorrentDownloadThread(QtCore.QThread):
                 error_msg = "aria2c non trouvé. Téléchargez-le depuis https://github.com/aria2/aria2/releases"
                 logger.error(error_msg)
                 self.finished.emit(False, error_msg)
-                os.unlink(torrent_file_path)
                 return
             
             logger.info(f"Using aria2c: {aria2c_exe}")
@@ -795,12 +945,10 @@ class TorrentDownloadThread(QtCore.QThread):
                     logger.error(error_msg)
                     logger.error(f"Available files:\n{result.stdout}")
                     self.finished.emit(False, error_msg)
-                    os.unlink(torrent_file_path)
                     return
             except Exception as e:
                 logger.error(f"Failed to list torrent files: {e}")
                 self.finished.emit(False, f"Erreur lors de l'analyse du torrent: {str(e)}")
-                os.unlink(torrent_file_path)
                 return
             
             # Prepare aria2c command with file selection
@@ -811,13 +959,13 @@ class TorrentDownloadThread(QtCore.QThread):
                 f"--select-file={target_index}",  # Only download target file
                 f"--index-out={target_index}={self.target_file}",  # Output directly without subdirs
                 "--file-allocation=none",  # Disable pre-allocation for faster start
-                "--seed-time=0",  # Don't seed after download
+                "--seed-ratio=0",  # Seed without time limit
                 "--bt-max-peers=50",
                 "--max-connection-per-server=16",
                 "--min-split-size=1M",
                 "--split=16",
                 "--enable-rpc=false",
-                "--summary-interval=0",  # Disable summary
+                "--summary-interval=1",
                 "--console-log-level=notice",
                 "--show-console-readout=true"  # Show progress on console
             ]
@@ -841,17 +989,275 @@ class TorrentDownloadThread(QtCore.QThread):
                 universal_newlines=True,
                 creationflags=creation_flags
             )
-            
-            # Store PID for forced killing if needed
+
             self.process_pid = self.process.pid
             logger.info(f"aria2c started with PID: {self.process_pid}")
-            
-            # Read line by line instead of character by character
+
             while True:
                 if self._is_cancelled:
                     logger.info("Cancellation requested, terminating aria2c...")
                     try:
-                        # Close stdout to release handle
+                        if self.process.stdout:
+                            self.process.stdout.close()
+
+                        self.process.terminate()
+                        self.process.wait(timeout=3)
+                        logger.info("aria2c terminated on cancel")
+                    except subprocess.TimeoutExpired:
+                        logger.warning("Force killing aria2c on cancel...")
+                        self.process.kill()
+                        try:
+                            self.process.wait(timeout=2)
+                        except Exception:
+                            pass
+                    except Exception as e:
+                        logger.error(f"Error during cancel: {e}")
+
+                    if self.download_completed_notified:
+                        logger.info("Seeding VHD arrêté après téléchargement complet")
+                        return
+
+                    logger.warning("Torrent download cancelled")
+                    self.finished.emit(False, "Téléchargement annulé")
+                    return
+
+                ret = self.process.poll()
+                if ret is not None:
+                    if ret == 0 or self.download_completed_notified:
+                        if ret != 0:
+                            logger.info(f"aria2c a quitté après téléchargement complet (code {ret})")
+                        break
+
+                    error_msg = f"aria2c a échoué (code {ret})"
+                    logger.error(error_msg)
+                    remaining = self.process.stdout.read()
+                    if remaining:
+                        logger.error(f"aria2c output: {remaining}")
+                    self.finished.emit(False, error_msg)
+                    return
+
+                line = self.process.stdout.readline()
+                if not line:
+                    time.sleep(0.1)
+                    continue
+
+                line = line.strip()
+                if not line:
+                    continue
+
+                if "[NOTICE]" in line:
+                    if any(keyword in line for keyword in [
+                        "Redirecting to", "BitTorrent:", "DHT:", "Download complete", "Downloading"
+                    ]):
+                        logger.info(f"aria2c: {line}")
+                    continue
+
+                if "FileAlloc:" in line:
+                    continue
+
+                try:
+                    status = _parse_aria2_status_line(line)
+                    if status:
+                        self.peer_count = status['peer_count']
+                        self.seeder_count = status['seeder_count']
+                        self.is_seeding = status['progress'] >= 1000
+                        self.last_status_text = _format_torrent_status_text(
+                            self.peer_count,
+                            self.seeder_count,
+                            status['speed_mb'],
+                            status['eta_str'],
+                            self.is_seeding,
+                        )
+
+                        current_time = time.time()
+                        if not hasattr(self, '_last_emit_time'):
+                            self._last_emit_time = 0
+                        if not hasattr(self, '_last_status_log_time'):
+                            self._last_status_log_time = 0
+
+                        if current_time - self._last_emit_time >= 0.5:
+                            self.progress.emit(status['progress'], status['speed_mb'], self.last_status_text)
+                            self._last_emit_time = current_time
+
+                        if status['progress'] >= 1000:
+                            _notify_torrent_payload_ready(self, f"Téléchargement terminé: {self.target_file}")
+
+                        if current_time - self._last_status_log_time >= 3:
+                            logger.info(
+                                f"aria2c status: {status['progress_pct']:.2f}% | DL {status['speed_mb']:.2f} MB/s | "
+                                f"Conn {self.peer_count} | Seeders {self.seeder_count} | ETA {status['eta_str']}"
+                            )
+                            self._last_status_log_time = current_time
+                except Exception as e:
+                    logger.error(f"Failed to parse progress from '{line}': {e}", exc_info=True)
+            
+            # Download complete
+            logger.info("Torrent download completed")
+            logger.info(f"Torrent file kept for reuse: {torrent_file_path}")
+            
+            # Verify file exists
+            downloaded_file = os.path.join(vhd_folder, self.target_file)
+            if os.path.exists(downloaded_file):
+                logger.info(f"VHDX torrent download completed: {downloaded_file}")
+                if not self.download_completed_notified:
+                    self.progress.emit(1000, 0, "00:00")
+                    self.finished.emit(True, f"Téléchargement terminé: {self.target_file}")
+            else:
+                logger.error("Download failed: File not found after download")
+                self.finished.emit(False, "Échec du téléchargement")
+                
+        except Exception as e:
+            logger.error(f"Torrent download exception: {e}", exc_info=True)
+            self.finished.emit(False, f"Erreur: {str(e)}")
+
+
+class DiagboxTorrentDownloadThread(QtCore.QThread):
+    """Thread for downloading Diagbox versions via torrent"""
+    progress = QtCore.Signal(int, float, str)  # value (0-1000), speed (MB/s), eta
+    finished = QtCore.Signal(bool, str)  # success, message
+    
+    def __init__(self, torrent_url, file_path, version_name, total_size=0, seed_existing_only=False):
+        super().__init__()
+        self.torrent_url = torrent_url
+        self.file_path = file_path
+        self.version_name = version_name
+        self.total_size = total_size
+        self.seed_existing_only = seed_existing_only
+        self._is_cancelled = False
+        self._is_paused = False
+        self.process = None
+        self.is_seeding = False
+        self.peer_count = 0
+        self.seeder_count = 0
+        self.last_status_text = "Initialisation du torrent..."
+        self.download_completed_notified = False
+    
+    def cancel(self):
+        """Cancel the download"""
+        self._is_cancelled = True
+        if self.process:
+            try:
+                if self.process.stdout:
+                    try:
+                        self.process.stdout.close()
+                    except:
+                        pass
+                
+                self.process.terminate()
+                logger.info(f"Sent terminate signal to aria2c PID {self.process.pid}")
+                
+                try:
+                    self.process.wait(timeout=3)
+                    logger.info("aria2c terminated gracefully")
+                except subprocess.TimeoutExpired:
+                    logger.warning("aria2c didn't terminate, force killing...")
+                    self.process.kill()
+                    self.process.wait(timeout=2)
+                    logger.info("aria2c force killed")
+                    
+            except Exception as e:
+                logger.error(f"Failed to terminate aria2c: {e}")
+    
+    def pause(self):
+        """Pause the download (not supported with aria2c)"""
+        self._is_paused = True
+    
+    def resume(self):
+        """Resume the download"""
+        self._is_paused = False
+    
+    def run(self):
+        try:
+            # Create destination folder
+            dest_folder = os.path.dirname(self.file_path)
+            if dest_folder and not os.path.exists(dest_folder):
+                os.makedirs(dest_folder, exist_ok=True)
+            
+            logger.info(f"Starting Diagbox torrent download")
+            logger.info(f"Destination: {self.file_path}")
+            
+            torrent_file_name = f"{os.path.splitext(os.path.basename(self.file_path))[0]}.torrent"
+            torrent_file_path = _ensure_persistent_torrent_file(
+                self.torrent_url,
+                dest_folder or PERSISTENT_DOWNLOAD_FOLDER,
+                preferred_name=torrent_file_name,
+            )
+            
+            # Check for aria2c executable
+            aria2c_paths = [
+                BASE / "tools" / "aria2c.exe",
+                "aria2c"
+            ]
+            
+            aria2c_exe = None
+            for path in aria2c_paths:
+                if isinstance(path, Path) and path.exists():
+                    aria2c_exe = str(path)
+                    break
+                elif isinstance(path, str) and shutil.which(path):
+                    aria2c_exe = path
+                    break
+            
+            if not aria2c_exe:
+                error_msg = "aria2c non trouvé. Téléchargez-le depuis https://github.com/aria2/aria2/releases"
+                logger.error(error_msg)
+                self.finished.emit(False, error_msg)
+                return
+            
+            logger.info(f"Using aria2c: {aria2c_exe}")
+            
+            # Prepare aria2c command
+            cmd = [
+                aria2c_exe,
+                torrent_file_path,
+                f"--dir={dest_folder}",
+                "--file-allocation=none",
+                "--seed-ratio=0",
+                "--bt-max-peers=50",
+                "--max-connection-per-server=16",
+                "--min-split-size=1M",
+                "--split=16",
+                "--enable-rpc=false",
+                "--summary-interval=1",
+                "--console-log-level=notice",
+                "--show-console-readout=true"
+            ]
+
+            if self.seed_existing_only:
+                cmd.extend([
+                    "--check-integrity=true",
+                    "--bt-hash-check-seed=true",
+                ])
+                logger.info(f"Starting integrity check for existing archive before seeding: {self.file_path}")
+            
+            logger.info(f"Starting aria2c...")
+            
+            # Emit initial progress
+            self.progress.emit(0, 0.0, "--:--")
+            
+            # Use CREATE_NEW_PROCESS_GROUP to allow proper termination
+            creation_flags = subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
+            if sys.platform == 'win32':
+                creation_flags |= subprocess.CREATE_NEW_PROCESS_GROUP
+            
+            self.process = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+                universal_newlines=True,
+                creationflags=creation_flags
+            )
+            
+            self.process_pid = self.process.pid
+            logger.info(f"aria2c started with PID: {self.process_pid}")
+            
+            # Read line by line
+            while True:
+                if self._is_cancelled:
+                    logger.info("Cancellation requested, terminating aria2c...")
+                    try:
                         if self.process.stdout:
                             self.process.stdout.close()
                         
@@ -867,32 +1273,38 @@ class TorrentDownloadThread(QtCore.QThread):
                             pass
                     except Exception as e:
                         logger.error(f"Error during cancel: {e}")
+
+                    if self.download_completed_notified or self.seed_existing_only:
+                        logger.info(f"Seeding Diagbox {self.version_name} arrêté après téléchargement complet")
+                        return
                     
                     logger.warning("Torrent download cancelled")
+                    # Remove partial file
                     try:
-                        os.unlink(torrent_file_path)
+                        if os.path.exists(self.file_path):
+                            os.remove(self.file_path)
                     except:
                         pass
-                    self.finished.emit(False, "Téléchargement annulé")
+                    self.finished.emit(False, f"Download Diagbox {self.version_name} cancelled")
                     return
                 
                 # Check if process finished
                 ret = self.process.poll()
                 if ret is not None:
-                    if ret == 0:
+                    if ret == 0 or self.download_completed_notified:
+                        if ret != 0:
+                            logger.info(f"aria2c a quitté après téléchargement complet (code {ret})")
                         break
                     else:
                         error_msg = f"aria2c a échoué (code {ret})"
                         logger.error(error_msg)
-                        # Read remaining output for error messages
                         remaining = self.process.stdout.read()
                         if remaining:
                             logger.error(f"aria2c output: {remaining}")
-                        os.unlink(torrent_file_path)
                         self.finished.emit(False, error_msg)
                         return
                 
-                # Read line (handles both \n and \r)
+                # Read line
                 line = self.process.stdout.readline()
                 if not line:
                     time.sleep(0.1)
@@ -901,159 +1313,61 @@ class TorrentDownloadThread(QtCore.QThread):
                 line = line.strip()
                 if not line:
                     continue
-                
-                # Skip DHT, BitTorrent notices, and redirection logs
-                if any(skip_keyword in line for skip_keyword in [
-                    "[ERROR]", "[NOTICE]", "DHT:", "BitTorrent:", 
-                    "Redirecting to", "DHTRoutingTable", "listening on"
-                ]):
+
+                if "[NOTICE]" in line:
+                    if any(keyword in line for keyword in [
+                        "Redirecting to", "BitTorrent:", "DHT:", "Download complete", "Downloading"
+                    ]):
+                        logger.info(f"aria2c: {line}")
                     continue
-                
-                # Skip file allocation lines - we only care about actual download progress
+
                 if "FileAlloc:" in line:
                     continue
-                
-                # Parse progress from aria2c output
-                # Formats: [#abc123 100MiB/1GiB(0%) CN:5 DL:1.2MiB ETA:5m30s]
+
                 try:
-                    if "DL:" in line and line.startswith("[#"):
-                        # Find the first bracket block (main download progress)
-                        first_bracket_end = line.find("]")
-                        if first_bracket_end > 0:
-                            main_line = line[:first_bracket_end]
-                            
-                            # Extract downloaded/total bytes (e.g., "80KiB/30GiB" or "1.5GiB/30GiB")
-                            # Pattern: [#hash downloaded/total(pct%) ...]
-                            progress_pct = 0.0
-                            progress = 0
-                            
-                            # First try to extract percentage from parentheses as fallback
-                            paren_start = main_line.find("(")
-                            if paren_start > 0:
-                                paren_end = main_line.find("%", paren_start)
-                                if paren_end > paren_start:
-                                    pct_str = main_line[paren_start+1:paren_end].strip()
-                                    try:
-                                        progress_pct = float(pct_str)
-                                        progress = int(progress_pct * 10)
-                                        logger.debug(f"Using aria2c reported percentage: {progress_pct:.2f}%")
-                                    except ValueError:
-                                        pass
-                            
-                            # Try to calculate from bytes if available
-                            try:
-                                hash_end = main_line.find(" ", 2)  # Skip "[#"
-                                if hash_end > 0:
-                                    rest = main_line[hash_end:].strip()
-                                    # Find the part before "("
-                                    paren_pos = rest.find("(")
-                                    if paren_pos > 0:
-                                        size_part = rest[:paren_pos].strip()  # e.g., "80KiB/30GiB"
-                                        if "/" in size_part:
-                                            downloaded_str, total_str = size_part.split("/", 1)
-                                            
-                                            # Parse size strings to bytes
-                                            def parse_size(s):
-                                                s = s.strip()
-                                                multipliers = [
-                                                    ('TiB', 1024**4),
-                                                    ('GiB', 1024**3),
-                                                    ('MiB', 1024**2),
-                                                    ('KiB', 1024),
-                                                    ('B', 1),
-                                                ]
-                                                for suffix, mult in multipliers:
-                                                    if s.endswith(suffix):
-                                                        num_str = s[:-len(suffix)].strip()
-                                                        try:
-                                                            return float(num_str) * mult
-                                                        except ValueError:
-                                                            return 0.0
-                                                return 0.0
-                                            
-                                            downloaded_bytes = parse_size(downloaded_str)
-                                            total_bytes = parse_size(total_str)
-                                            
-                                            if total_bytes > 0 and downloaded_bytes > 0:
-                                                calc_progress_pct = (downloaded_bytes / total_bytes) * 100
-                                                # Use calculated value if it's reasonable
-                                                if calc_progress_pct >= progress_pct:
-                                                    progress_pct = calc_progress_pct
-                                                    progress = int(progress_pct * 10)
-                                                    logger.debug(f"Calculated progress from bytes: {downloaded_str}/{total_str} = {progress_pct:.2f}%")
-                            except Exception as e:
-                                logger.debug(f"Failed to parse bytes progress: {e}")
-                            
-                            # Extract speed (DL:xxxKiB or DL:xxxMiB)
-                            speed_mb = 0.0
-                            if "DL:" in main_line:
-                                dl_start = main_line.find("DL:") + 3
-                                # Find next space or end
-                                dl_end = len(main_line)
-                                for i in range(dl_start, len(main_line)):
-                                    if main_line[i] in [' ', ']', '\t']:
-                                        dl_end = i
-                                        break
-                                speed_str = main_line[dl_start:dl_end].strip()
-                                
-                                logger.debug(f"Speed string extracted: '{speed_str}'")
-                                
-                                try:
-                                    if "MiB" in speed_str:
-                                        speed_mb = float(speed_str.replace("MiB", "").strip())
-                                    elif "KiB" in speed_str:
-                                        speed_mb = float(speed_str.replace("KiB", "").strip()) / 1024
-                                    elif "GiB" in speed_str:
-                                        speed_mb = float(speed_str.replace("GiB", "").strip()) * 1024
-                                    elif "B" in speed_str and "i" not in speed_str:
-                                        val = speed_str.replace("B", "").strip()
-                                        if val and val != "0":
-                                            speed_mb = float(val) / (1024 * 1024)
-                                    
-                                    logger.debug(f"Parsed speed: {speed_mb:.2f} MB/s")
-                                except ValueError as ve:
-                                    logger.warning(f"Cannot parse speed '{speed_str}': {ve}")
-                            
-                            # Extract ETA
-                            eta_str = "--:--"
-                            if "ETA:" in main_line:
-                                eta_start = main_line.find("ETA:") + 4
-                                eta_end = main_line.find("]", eta_start)
-                                if eta_end == -1:
-                                    eta_end = len(main_line)
-                                eta_str = main_line[eta_start:eta_end].strip()
-                            
-                            # Always emit progress update
-                            current_time = time.time()
-                            if not hasattr(self, '_last_emit_time'):
-                                self._last_emit_time = 0
-                            
-                            if current_time - self._last_emit_time >= 0.5:
-                                logger.debug(f"Emitting progress: {progress_pct:.2f}% | {speed_mb:.2f} MB/s | {eta_str}")
-                                self.progress.emit(progress, speed_mb, eta_str)
-                                self._last_emit_time = current_time
-                                
+                    status = _parse_aria2_status_line(line)
+                    if status:
+                        self.peer_count = status['peer_count']
+                        self.seeder_count = status['seeder_count']
+                        self.is_seeding = status['progress'] >= 1000
+                        self.last_status_text = _format_torrent_status_text(
+                            self.peer_count,
+                            self.seeder_count,
+                            status['speed_mb'],
+                            status['eta_str'],
+                            self.is_seeding,
+                        )
+
+                        current_time = time.time()
+                        if not hasattr(self, '_last_emit_time'):
+                            self._last_emit_time = 0
+                        if not hasattr(self, '_last_status_log_time'):
+                            self._last_status_log_time = 0
+
+                        if current_time - self._last_emit_time >= 0.5:
+                            self.progress.emit(status['progress'], status['speed_mb'], self.last_status_text)
+                            self._last_emit_time = current_time
+
+                        if status['progress'] >= 1000:
+                            _notify_torrent_payload_ready(self, f"Téléchargement terminé: Diagbox {self.version_name}")
+
+                        if current_time - self._last_status_log_time >= 3:
+                            logger.info(
+                                f"aria2c status: {status['progress_pct']:.2f}% | DL {status['speed_mb']:.2f} MB/s | "
+                                f"Conn {self.peer_count} | Seeders {self.seeder_count} | ETA {status['eta_str']}"
+                            )
+                            self._last_status_log_time = current_time
                 except Exception as e:
-                    logger.error(f"Failed to parse progress from '{line}': {e}", exc_info=True)
+                    logger.debug(f"Error parsing progress: {e}")
             
-            # Download complete
-            logger.info("Torrent download completed")
-            self.progress.emit(1000, 0, "00:00")
-            
-            # Clean up torrent file
-            os.unlink(torrent_file_path)
-            
-            # Verify file exists
-            downloaded_file = os.path.join(vhd_folder, self.target_file)
-            if os.path.exists(downloaded_file):
-                logger.info(f"VHDX torrent download completed: {downloaded_file}")
-                self.finished.emit(True, f"Téléchargement terminé: {self.target_file}")
-            else:
-                logger.error("Download failed: File not found after download")
-                self.finished.emit(False, "Échec du téléchargement")
+            # Download completed successfully
+            logger.info("Torrent download completed successfully")
+            logger.info(f"Torrent file kept for reuse: {torrent_file_path}")
+            if not self.download_completed_notified:
+                self.finished.emit(True, f"Téléchargement terminé: Diagbox {self.version_name}")
                 
         except Exception as e:
-            logger.error(f"Torrent download exception: {e}", exc_info=True)
+            logger.error(f"Diagbox torrent download exception: {e}", exc_info=True)
             self.finished.emit(False, f"Erreur: {str(e)}")
 
 
@@ -1894,6 +2208,8 @@ class MainWindow(QtWidgets.QWidget):
     def __init__(self, splash=None):
         super().__init__()
         self.splash = splash  # Keep reference to splash screen
+        self._allow_close = False
+        self._tray_notified_once = False
         
         self.setWindowTitle(translator.t('app.title'))
         self.setWindowFlags(QtCore.Qt.WindowType.FramelessWindowHint)
@@ -1901,7 +2217,7 @@ class MainWindow(QtWidgets.QWidget):
         self.resize(1220, 500)  # Increased width to accommodate log sidebar
 
         # Download variables
-        self.download_folder = "C:\\INSTALL\\"
+        self.download_folder = PERSISTENT_DOWNLOAD_FOLDER
         self.last_version_diagbox = ""
         self.diagbox_path = ""
         self.auto_install = None
@@ -1914,6 +2230,10 @@ class MainWindow(QtWidgets.QWidget):
         self.dragPos = QtCore.QPoint()
         self.log_widget = None
         self.log_handler = None
+        self.tray_icon = None
+        self.seed_status_label = None
+        self.seed_status_timer = None
+        self.background_diagbox_seed_threads = []
         
         # Version options: load from remote JSON (configured in `config.URL_VERSION_OPTIONS`)
         # Falls back to the built-in defaults if remote fetch fails.
@@ -1941,6 +2261,12 @@ class MainWindow(QtWidgets.QWidget):
         self.manual_defender_finished.connect(self._on_manual_defender_finished)
 
         self.setup_ui()
+        self.setup_system_tray()
+
+        self.seed_status_timer = QtCore.QTimer(self)
+        self.seed_status_timer.timeout.connect(self.update_seed_status_panel)
+        self.seed_status_timer.start(1500)
+        QtCore.QTimer.singleShot(1500, self.start_auto_seed_for_downloaded_diagbox_archives)
         
         # Keep splash screen visible until all loading is complete
         # It will be closed by _close_splash_screen() after load_changelog finishes
@@ -1956,8 +2282,7 @@ class MainWindow(QtWidgets.QWidget):
             self.splash = None
 
     def load_version_options(self):
-    
-
+        
         try:
             resp = requests.get(URL_VERSION_OPTIONS, timeout=6)
             resp.raise_for_status()
@@ -1969,17 +2294,18 @@ class MainWindow(QtWidgets.QWidget):
                         display = item.get('display_name') or item.get('display') or item.get('name')
                         version = item.get('version')
                         url = item.get('url')
+                        torrent_url = item.get('torrent_url')
                         if display and version and url:
-                            options.append((display, version, url))
+                            options.append((display, version, url, torrent_url))
                     elif isinstance(item, (list, tuple)) and len(item) >= 3:
-                        options.append((item[0], item[1], item[2]))
+                        torrent_url = item[3] if len(item) > 3 else None
+                        options.append((item[0], item[1], item[2], torrent_url))
 
             if options:
                 logger.info(f"Loaded {len(options)} version options")
                 return options
             else:
                 logger.warning("Version options JSON did not contain valid entries")
-                # Return empty list to indicate maintenance / no available versions
                 return []
         except requests.exceptions.RequestException:
             logger.warning("Unable to reach update server. Please check your network connection.")
@@ -2467,10 +2793,106 @@ class MainWindow(QtWidgets.QWidget):
                         downloaded_versions.append({
                             'version': version,
                             'path': file_path,
+                            'filename': file,
                             'size': file_size,
                             'size_mb': file_size / (1024 * 1024)
                         })
         return downloaded_versions
+
+    def _find_version_option_for_local_archive(self, local_version):
+        normalized_local = self._sanitize_version_for_filename(local_version)
+        for item in getattr(self, 'version_options', []) or []:
+            if len(item) < 4:
+                continue
+            display_name, version_name, direct_url, torrent_url = item[0], item[1], item[2], item[3]
+            if not torrent_url:
+                continue
+
+            candidates = {
+                self._sanitize_version_for_filename(version_name),
+                self._sanitize_version_for_filename(display_name),
+            }
+            if direct_url:
+                candidates.add(self._sanitize_version_for_filename(os.path.splitext(os.path.basename(direct_url))[0]))
+
+            if normalized_local in candidates:
+                return {
+                    'display_name': display_name,
+                    'version_name': version_name,
+                    'direct_url': direct_url,
+                    'torrent_url': torrent_url,
+                }
+        return None
+
+    def _prune_background_seed_threads(self):
+        self.background_diagbox_seed_threads = [
+            thread for thread in getattr(self, 'background_diagbox_seed_threads', [])
+            if thread is not None and thread.isRunning()
+        ]
+
+    def _on_background_diagbox_seed_finished(self, version_name, success, message):
+        if success:
+            logger.info(f"Auto-seed prêt pour {version_name}: {message}")
+        else:
+            logger.warning(f"Auto-seed arrêté pour {version_name}: {message}")
+        self._prune_background_seed_threads()
+
+    def start_auto_seed_for_downloaded_diagbox_archives(self):
+        self._prune_background_seed_threads()
+
+        downloaded_versions = self.check_downloaded_versions()
+        if not downloaded_versions:
+            logger.info("Auto-seed startup: no local Diagbox archives detected")
+            return
+
+        started_count = 0
+        for entry in downloaded_versions:
+            version_name = entry.get('version')
+            file_path = entry.get('path')
+            file_name = entry.get('filename', '')
+
+            if not version_name or not file_path or not os.path.exists(file_path):
+                continue
+
+            if not file_name.lower().endswith('.7z'):
+                continue
+
+            if any(
+                getattr(thread, 'file_path', None) == file_path and thread.isRunning()
+                for thread in self.background_diagbox_seed_threads
+            ):
+                continue
+
+            version_option = self._find_version_option_for_local_archive(version_name)
+            if not version_option:
+                logger.info(f"Auto-seed skipped for {file_name}: no matching torrent metadata found")
+                continue
+
+            expected_file_name = os.path.basename(version_option.get('direct_url') or '')
+            if expected_file_name and os.path.basename(file_path).lower() != expected_file_name.lower():
+                logger.info(
+                    f"Auto-seed skipped for {file_name}: local filename differs from torrent payload '{expected_file_name}'"
+                )
+                continue
+
+            logger.info(f"Auto-starting seed for local Diagbox archive: {file_name}")
+            seed_thread = DiagboxTorrentDownloadThread(
+                version_option['torrent_url'],
+                file_path,
+                version_name,
+                total_size=entry.get('size', 0),
+                seed_existing_only=True,
+            )
+            seed_thread.finished.connect(
+                lambda success, message, version_name=version_name: self._on_background_diagbox_seed_finished(
+                    version_name, success, message
+                )
+            )
+            seed_thread.start()
+            self.background_diagbox_seed_threads.append(seed_thread)
+            started_count += 1
+
+        logger.info(f"Auto-seed startup complete: {started_count} archive(s) started")
 
     def set_buttons_enabled(self, enabled):
         """Enable or disable all buttons and combo box in the install page"""
@@ -2862,7 +3284,7 @@ class MainWindow(QtWidgets.QWidget):
         if hasattr(self, 'version_combo') and self.version_combo is not None:
             selected_data = self.version_combo.currentData()
             if selected_data:
-                version, url = selected_data
+                version, url = selected_data[0], selected_data[1]
                 self.last_version_diagbox = version
                 # Try three possible formats:
                 # 1. Normalized format (what download_diagbox creates): 09.186.7z
@@ -3376,7 +3798,127 @@ class MainWindow(QtWidgets.QWidget):
             
             if reply == QtWidgets.QMessageBox.StandardButton.Yes:
                 # Restart application
+                self._allow_close = True
                 QtWidgets.QApplication.quit()
+
+    def get_diagbox_version_options_for_mode(self, mode):
+        """Return version options filtered for the selected download mode."""
+        options = list(getattr(self, 'version_options', []) or [])
+        if mode == "torrent":
+            return [item for item in options if len(item) >= 4 and item[3]]
+        return options
+
+    def refresh_diagbox_version_combo(self, preferred_version=None):
+        """Refresh the version combo according to the selected mode."""
+        if not hasattr(self, 'version_combo') or not self.version_combo:
+            return
+
+        selected_mode = "direct"
+        if hasattr(self, 'diagbox_mode_combo') and self.diagbox_mode_combo:
+            selected_mode = self.diagbox_mode_combo.currentData() or "direct"
+
+        available_options = self.get_diagbox_version_options_for_mode(selected_mode)
+        if preferred_version is None:
+            current_data = self.version_combo.currentData()
+            if current_data:
+                preferred_version = current_data[0]
+
+        self.version_combo.blockSignals(True)
+        self.version_combo.clear()
+        for item in available_options:
+            if len(item) >= 4:
+                display_name, version, url, torrent_url = item
+            else:
+                display_name, version, url = item[0], item[1], item[2]
+                torrent_url = None
+            self.version_combo.addItem(display_name, userData=(version, url, torrent_url))
+
+        if self.version_combo.count() > 0:
+            selected_index = 0
+            if preferred_version:
+                for index in range(self.version_combo.count()):
+                    item_data = self.version_combo.itemData(index)
+                    if item_data and item_data[0] == preferred_version:
+                        selected_index = index
+                        break
+            self.version_combo.setCurrentIndex(selected_index)
+            current_data = self.version_combo.currentData()
+            if current_data:
+                self.last_version_diagbox = current_data[0]
+
+        self.version_combo.blockSignals(False)
+
+    def on_diagbox_mode_changed(self):
+        """Handle mode change and filter the version list accordingly."""
+        try:
+            preferred_version = None
+            if hasattr(self, 'version_combo') and self.version_combo:
+                current_data = self.version_combo.currentData()
+                if current_data:
+                    preferred_version = current_data[0]
+
+            self.refresh_diagbox_version_combo(preferred_version=preferred_version)
+            self.on_diagbox_version_changed()
+        except Exception as e:
+            logger.warning(f"Error updating version list for selected mode: {e}")
+
+    def on_diagbox_version_changed(self):
+        """Handle Diagbox version change and update download mode availability."""
+        try:
+            has_torrent = False
+            torrent_options = self.get_diagbox_version_options_for_mode("torrent")
+            selected_mode = "direct"
+            if hasattr(self, 'diagbox_mode_combo') and self.diagbox_mode_combo:
+                selected_mode = self.diagbox_mode_combo.currentData() or "direct"
+
+            if hasattr(self, 'version_combo') and self.version_combo:
+                selected_data = self.version_combo.currentData()
+                if selected_data and len(selected_data) >= 3:
+                    torrent_url = selected_data[2]
+                    has_torrent = bool(torrent_url)
+
+            # Si le torrent est dispo pour la version sélectionnée, on met le mode torrent par défaut
+            if has_torrent and hasattr(self, 'diagbox_mode_combo') and self.diagbox_mode_combo:
+                # 1 = index du mode torrent (supposé)
+                if self.diagbox_mode_combo.currentData() != "torrent":
+                    model = self.diagbox_mode_combo.model()
+                    if model and model.rowCount() > 1:
+                        torrent_item = model.item(1)
+                        if torrent_item and torrent_item.isEnabled():
+                            self.diagbox_mode_combo.setCurrentIndex(1)
+                            selected_mode = "torrent"
+
+            has_multiple_sources = has_torrent
+
+            if hasattr(self, 'diagbox_mode_combo'):
+                model = self.diagbox_mode_combo.model()
+                torrent_item = model.item(1) if model and model.rowCount() > 1 else None
+                if torrent_item is not None:
+                    torrent_item.setEnabled(bool(torrent_options))
+
+                if not torrent_options and self.diagbox_mode_combo.currentData() == "torrent":
+                    self.diagbox_mode_combo.setCurrentIndex(0)
+
+                self.diagbox_mode_combo.setVisible(has_multiple_sources)
+
+                tooltip = ""
+                if not torrent_options:
+                    tooltip = "Aucune version disponible en torrent"
+                elif selected_mode == "direct" and not has_torrent:
+                    tooltip = "Torrent indisponible pour cette version"
+                self.diagbox_mode_combo.setToolTip(tooltip)
+
+            if hasattr(self, 'diagbox_mode_label'):
+                self.diagbox_mode_label.setVisible(has_multiple_sources)
+                self.diagbox_mode_label.setToolTip(self.diagbox_mode_combo.toolTip() if hasattr(self, 'diagbox_mode_combo') else "")
+
+            logger.debug(
+                f"Diagbox version changed - Selected mode: {selected_mode}, "
+                f"torrent versions available: {len(torrent_options)}, "
+                f"selected version torrent-ready: {has_torrent}"
+            )
+        except Exception as e:
+            logger.warning(f"Error updating download mode visibility: {e}")
 
     def fetch_last_version_diagbox(self):
         """Get the latest Diagbox version from version_options.
@@ -3708,6 +4250,7 @@ class MainWindow(QtWidgets.QWidget):
                 return
 
             # Close the application to allow updater to replace the executable
+            self._allow_close = True
             QtWidgets.QApplication.quit()
 
         except Exception as e:
@@ -3722,14 +4265,20 @@ class MainWindow(QtWidgets.QWidget):
             logger.info("Download cancelled due to system requirements")
             return
         
-        # Get selected version from combo box (and associated URL)
+        # Get selected version from combo box (and associated URLs)
         url = None
+        torrent_url = None
         if hasattr(self, 'version_combo'):
             selected_data = self.version_combo.currentData()
             if selected_data:
-                version, url = selected_data
+                if len(selected_data) >= 3:
+                    version, url, torrent_url = selected_data[0], selected_data[1], selected_data[2]
+                else:
+                    version, url = selected_data[0], selected_data[1]
+                    torrent_url = None
                 self.last_version_diagbox = version
                 logger.info(f"Selected version: {version}")
+        
         # If we still don't have an URL, try to resolve it from loaded version options
         if not url:
             # Ensure we have a last version value to look up
@@ -3739,9 +4288,16 @@ class MainWindow(QtWidgets.QWidget):
                 return
 
             # Try to find an entry in self.version_options matching the version
-            for display_name, version, vurl in getattr(self, 'version_options', []):
+            for item in getattr(self, 'version_options', []):
+                if len(item) >= 4:
+                    display_name, version, vurl, vtururl = item
+                else:
+                    display_name, version, vurl = item[0], item[1], item[2]
+                    vtururl = None
+                    
                 if version == self.last_version_diagbox or display_name == self.last_version_diagbox:
                     url = vurl
+                    torrent_url = vtururl
                     break
 
         # If no URL was found, warn the user and abort (no hard-coded archive.org fallback)
@@ -3749,6 +4305,23 @@ class MainWindow(QtWidgets.QWidget):
             QtWidgets.QMessageBox.warning(self, translator.t('messages.download.title'),
                                           translator.t('messages.download.no_url', version=self.last_version_diagbox))
             return
+
+        # Get selected download mode
+        selected_mode = "direct"
+        if hasattr(self, 'diagbox_mode_combo'):
+            selected_mode = self.diagbox_mode_combo.currentData()
+        
+        # If torrent mode is selected but no torrent URL, fall back to direct
+        if selected_mode == "torrent":
+            if not torrent_url:
+                logger.warning("Torrent mode selected but no torrent_url available, falling back to direct")
+                selected_mode = "direct"
+            else:
+                logger.info(f"Using torrent download mode")
+        else:
+            logger.info(f"Using direct download mode")
+
+        active_url = url
 
         # Set path to new format (use a normalized numeric version for filename)
         normalized = self._sanitize_version_for_filename(self.last_version_diagbox)
@@ -3759,24 +4332,29 @@ class MainWindow(QtWidgets.QWidget):
         
         file_path = self.diagbox_path
         
-        # Get total size for progress
-        try:
-            # Follow redirects to get actual file size
-            head = requests.head(url, allow_redirects=True, timeout=10)
-            total_size = int(head.headers.get('content-length', 0))
-            logger.info(f"File size from HEAD request: {total_size / (1024*1024):.2f} MB")
-        except Exception as e:
-            logger.warning(f"Could not get file size from HEAD request: {e}")
-            total_size = 0
+        # For direct download: Get total size for progress
+        total_size = 0
+        if selected_mode == "direct":
+            try:
+                # Follow redirects to get actual file size
+                head = requests.head(active_url, allow_redirects=True, timeout=10)
+                total_size = int(head.headers.get('content-length', 0))
+                logger.info(f"File size from HEAD request: {total_size / (1024*1024):.2f} MB")
+            except Exception as e:
+                logger.warning(f"Could not get file size from HEAD request: {e}")
+                total_size = 0
         
         # Check if file already exists and size matches
         if os.path.exists(file_path):
-            if total_size > 0 and os.path.getsize(file_path) == total_size:
-                QtWidgets.QMessageBox.information(self, translator.t('messages.download.title'), translator.t('messages.download.already_downloaded', version=self.last_version_diagbox))
-                return
-            else:
-                # File exists but size doesn't match, delete it
+            if selected_mode == "direct" and total_size > 0:
+                if os.path.getsize(file_path) == total_size:
+                    QtWidgets.QMessageBox.information(self, translator.t('messages.download.title'), translator.t('messages.download.already_downloaded', version=self.last_version_diagbox))
+                    return
+            # For torrent or if we can't verify size, delete and re-download
+            try:
                 os.remove(file_path)
+            except:
+                pass
         
         # Disable all buttons and combo box
         self.set_buttons_enabled(False)
@@ -3791,13 +4369,21 @@ class MainWindow(QtWidgets.QWidget):
         # Set progress bar
         bar = self.stack.currentWidget().findChild(QtWidgets.QProgressBar)
         if bar:
-            if total_size > 0:
+            if selected_mode == "direct" and total_size > 0:
                 bar.setRange(0, 1000)
                 bar.setValue(0)
                 bar.setFormat("0.0% - 0.0 MB/s - --:--")
             else:
-                bar.setRange(0, 0)  # indeterminate
-        self.download_thread = DownloadThread(url, file_path, self.last_version_diagbox, total_size)
+                bar.setRange(0, 0)  # indeterminate for torrent or unknown size
+        
+        # Create appropriate download thread
+        if selected_mode == "torrent":
+            logger.info(f"Starting torrent download from: {torrent_url}")
+            self.download_thread = DiagboxTorrentDownloadThread(torrent_url, file_path, self.last_version_diagbox, total_size)
+        else:
+            logger.info(f"Starting direct download from: {active_url}")
+            self.download_thread = DownloadThread(active_url, file_path, self.last_version_diagbox, total_size)
+        
         self.download_thread.progress.connect(self.update_progress)
         self.download_thread.finished.connect(self.on_download_finished)
         self.download_thread.start()
@@ -4013,6 +4599,66 @@ class MainWindow(QtWidgets.QWidget):
 
         # Initial system check
         self.check_system()
+
+    def setup_system_tray(self):
+        """Initialize system tray icon and context menu actions."""
+        if not QtWidgets.QSystemTrayIcon.isSystemTrayAvailable():
+            logger.warning("System tray is not available on this environment")
+            return
+
+        icon = QtGui.QIcon()
+        icon_path = BASE / "icons" / "icon.ico"
+        if icon_path.exists():
+            icon = QtGui.QIcon(str(icon_path))
+        if icon.isNull():
+            icon = self.windowIcon()
+        if icon.isNull():
+            png_icon = BASE / "icons" / "logo.png"
+            if png_icon.exists():
+                icon = QtGui.QIcon(str(png_icon))
+        if icon.isNull():
+            icon = self.style().standardIcon(QtWidgets.QStyle.StandardPixmap.SP_ComputerIcon)
+
+        if icon.isNull():
+            logger.warning("Tray icon initialization failed: no valid icon available")
+            return
+
+        self.tray_icon = QtWidgets.QSystemTrayIcon(icon, self)
+        self.tray_icon.setIcon(icon)
+        self.tray_icon.setToolTip(translator.t('app.title'))
+
+        # Keep menu/actions as instance attributes to prevent garbage collection.
+        self.tray_menu = QtWidgets.QMenu(self)
+        self.tray_show_action = self.tray_menu.addAction("Afficher")
+        self.tray_quit_action = self.tray_menu.addAction("Quitter")
+
+        self.tray_show_action.triggered.connect(self.show_from_tray)
+        self.tray_quit_action.triggered.connect(self.quit_from_tray)
+
+        self.tray_icon.setContextMenu(self.tray_menu)
+        self.tray_icon.activated.connect(self.on_tray_activated)
+        self.tray_icon.show()
+        self.tray_icon.setVisible(True)
+        logger.info("System tray icon initialized")
+
+    def on_tray_activated(self, reason):
+        """Restore the window when tray icon is clicked."""
+        if reason in (
+            QtWidgets.QSystemTrayIcon.ActivationReason.Trigger,
+            QtWidgets.QSystemTrayIcon.ActivationReason.DoubleClick,
+        ):
+            self.show_from_tray()
+
+    def show_from_tray(self):
+        """Restore and focus the main window from tray."""
+        self.showNormal()
+        self.raise_()
+        self.activateWindow()
+
+    def quit_from_tray(self):
+        """Quit application explicitly from tray menu."""
+        self._allow_close = True
+        self.close()
 
     def check_system(self):
         # Check OS
@@ -4280,7 +4926,13 @@ class MainWindow(QtWidgets.QWidget):
         is numerically the latest. If none, returns None."""
         try:
             best = None
-            for _, version, _url in getattr(self, 'version_options', []):
+            for item in getattr(self, 'version_options', []):
+                # Handle both 3 and 4 element tuples
+                if len(item) >= 2:
+                    version = item[1]
+                else:
+                    continue
+                    
                 if not best:
                     best = version
                     continue
@@ -4468,13 +5120,34 @@ class MainWindow(QtWidgets.QWidget):
             self._disable_actions_due_to_maintenance = True
         else:
             self.version_combo = QtWidgets.QComboBox()
-            for display_name, version, url in self.version_options:
-                self.version_combo.addItem(display_name, userData=(version, url))
             self.version_combo.setMinimumWidth(200)
             version_layout.addWidget(version_label)
             version_layout.addWidget(self.version_combo)
             version_layout.addStretch()
             right.addLayout(version_layout)
+
+        # Download mode selection (Direct/Torrent) for Diagbox versions
+        mode_layout = QtWidgets.QHBoxLayout()
+        mode_label = QtWidgets.QLabel(translator.t('labels.download_mode'))
+        self.diagbox_mode_label = mode_label
+        self.diagbox_mode_combo = QtWidgets.QComboBox()
+        self.diagbox_mode_combo.addItem(translator.t('labels.download_direct'), "direct")
+        self.diagbox_mode_combo.addItem(translator.t('labels.download_torrent'), "torrent")
+        self.diagbox_mode_combo.setMinimumWidth(120)
+        self.diagbox_mode_combo.setVisible(False)
+        mode_label.setVisible(False)
+        mode_layout.addWidget(mode_label)
+        mode_layout.addWidget(self.diagbox_mode_combo)
+        mode_layout.addStretch()
+
+        right.addLayout(mode_layout)
+
+        # Connect version combo change to update mode selector visibility
+        if hasattr(self, 'version_combo') and self.version_combo:
+            self.version_combo.currentIndexChanged.connect(self.on_diagbox_version_changed)
+            self.diagbox_mode_combo.currentIndexChanged.connect(self.on_diagbox_mode_changed)
+            self.refresh_diagbox_version_combo()
+            self.on_diagbox_version_changed()
 
         # Toggle auto install
         h = QtWidgets.QHBoxLayout()
@@ -5230,13 +5903,56 @@ class MainWindow(QtWidgets.QWidget):
         """)
         self.changelog_text.setPlainText("Loading changelog...")
         changelog_layout.addWidget(self.changelog_text)
+
+        self.seed_status_label = QtWidgets.QLabel("Etat du seed: Inactif")
+        self.seed_status_label.setWordWrap(True)
+        self.seed_status_label.setStyleSheet(
+            "background-color: #1e1e1e; color: #9ad29a; border: 1px solid #3a3a3a; "
+            "border-radius: 4px; padding: 8px; font-size: 11px;"
+        )
+        changelog_layout.addWidget(self.seed_status_label)
         
         layout.addWidget(changelog_frame)
         
         # Load changelog asynchronously
         QtCore.QTimer.singleShot(500, self.load_changelog)
+        QtCore.QTimer.singleShot(200, self.update_seed_status_panel)
         
         return w
+
+    def get_seed_status_lines(self):
+        """Return user-facing lines describing current torrent/seed state."""
+        lines = []
+
+        self._prune_background_seed_threads()
+
+        diag_thread = getattr(self, 'download_thread', None)
+        if isinstance(diag_thread, DiagboxTorrentDownloadThread) and diag_thread.isRunning():
+            status = getattr(diag_thread, 'last_status_text', '') or "Téléchargement torrent en cours"
+            lines.append(f"Diagbox: {status}")
+
+        for seed_thread in getattr(self, 'background_diagbox_seed_threads', []):
+            if isinstance(seed_thread, DiagboxTorrentDownloadThread) and seed_thread.isRunning():
+                status = getattr(seed_thread, 'last_status_text', '') or "Seed auto en cours"
+                lines.append(f"Diagbox {seed_thread.version_name}: {status}")
+
+        vhd_thread = getattr(self, 'vhdx_download_thread', None)
+        if isinstance(vhd_thread, TorrentDownloadThread) and vhd_thread.isRunning():
+            status = getattr(vhd_thread, 'last_status_text', '') or "Téléchargement torrent en cours"
+            lines.append(f"VHD: {status}")
+
+        if not lines:
+            lines.append("Aucun seed actif")
+
+        return lines
+
+    def update_seed_status_panel(self):
+        """Refresh seed status card in the Info tab."""
+        if not hasattr(self, 'seed_status_label') or not self.seed_status_label:
+            return
+
+        status_lines = self.get_seed_status_lines()
+        self.seed_status_label.setText("Etat du seed:\n- " + "\n- ".join(status_lines))
     
     def load_changelog(self):
         """Load changelog from the last 10 GitHub releases"""
@@ -5402,7 +6118,28 @@ class MainWindow(QtWidgets.QWidget):
             event.accept()
     
     def closeEvent(self, event):
-        """Clean up resources before closing"""
+        """Hide to tray on close; only fully exit when explicitly requested."""
+        if not self._allow_close and self.tray_icon and self.tray_icon.isVisible():
+            self.hide()
+            event.ignore()
+            if not self._tray_notified_once:
+                try:
+                    self.tray_icon.showMessage(
+                        translator.t('app.title'),
+                        "Application minimisée dans la zone de notification. Le seed continue en arrière-plan.",
+                        QtWidgets.QSystemTrayIcon.MessageIcon.Information,
+                        3000,
+                    )
+                except Exception:
+                    pass
+                self._tray_notified_once = True
+            return
+
+        self.cleanup_before_exit()
+        event.accept()
+
+    def cleanup_before_exit(self):
+        """Clean up resources before application exit."""
         # Kill any running aria2c processes
         try:
             for proc in psutil.process_iter(['pid', 'name']):
@@ -5427,8 +6164,16 @@ class MainWindow(QtWidgets.QWidget):
                 logger.info("Cancelling download thread")
                 self.download_thread.cancel()
                 self.download_thread.wait(2000)
-        
-        event.accept()
+
+        for seed_thread in getattr(self, 'background_diagbox_seed_threads', []):
+            try:
+                if seed_thread and seed_thread.isRunning():
+                    logger.info(f"Cancelling background seed thread for {seed_thread.version_name}")
+                    seed_thread.cancel()
+                    seed_thread.wait(2000)
+            except Exception as e:
+                logger.debug(f"Failed to stop background seed thread: {e}")
+
         # Stop download thread if running
         if self.download_thread and self.download_thread.isRunning():
             self.download_thread.cancel()
@@ -5438,8 +6183,12 @@ class MainWindow(QtWidgets.QWidget):
         if self.install_thread and self.install_thread.isRunning():
             self.install_thread.stop()
             self.install_thread.wait(2000)  # Wait max 2 seconds
-        
-        event.accept()
+
+        if self.tray_icon:
+            try:
+                self.tray_icon.hide()
+            except Exception:
+                pass
 
 
 if __name__ == "__main__":
@@ -5471,6 +6220,7 @@ if __name__ == "__main__":
             logger.warning(f"Failed to set AppUserModelID: {e}")
     
     app = QtWidgets.QApplication([])
+    app.setQuitOnLastWindowClosed(False)
     
     # Set application icon
     icon_path = BASE / "icons" / "icon.ico"
