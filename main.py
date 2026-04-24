@@ -2379,6 +2379,8 @@ class MainWindow(QtWidgets.QWidget):
         self.splash = splash  # Keep reference to splash screen
         self._allow_close = False
         self._tray_notified_once = False
+        # Keep legacy behavior: closing window minimizes to tray.
+        self.minimize_to_tray_on_close = True
         
         self.setWindowTitle(translator.t('app.title'))
         self.setWindowFlags(QtCore.Qt.WindowType.FramelessWindowHint)
@@ -4708,8 +4710,32 @@ class MainWindow(QtWidgets.QWidget):
 
     def quit_from_tray(self):
         """Quit application explicitly from tray menu."""
+        logger.info("Tray quit requested")
         self._allow_close = True
-        self.close()
+        try:
+            self.cleanup_before_exit()
+        except Exception as e:
+            logger.error(f"cleanup_before_exit failed during tray quit: {e}")
+
+        try:
+            self.close()
+        except Exception as e:
+            logger.error(f"Window close failed during tray quit: {e}")
+
+        # Force event loop shutdown even if hidden windows/timers are still present.
+        app = QtWidgets.QApplication.instance()
+        if app:
+            logger.info("Requesting Qt application shutdown from tray")
+            app.quit()
+
+        # Some environments keep Python alive because of lingering worker threads.
+        # As this path is an explicit user quit action, enforce process termination.
+        try:
+            active_threads = [t.name for t in threading.enumerate()]
+            logger.info(f"Forcing process exit after tray quit. Active threads={active_threads}")
+        except Exception:
+            logger.info("Forcing process exit after tray quit")
+        os._exit(0)
 
     def check_system(self):
         # Check OS
@@ -6169,8 +6195,8 @@ class MainWindow(QtWidgets.QWidget):
             event.accept()
     
     def closeEvent(self, event):
-        """Hide to tray on close; only fully exit when explicitly requested."""
-        if not self._allow_close and self.tray_icon and self.tray_icon.isVisible():
+        """Close window and exit app by default; optional tray-hide mode can be enabled."""
+        if self.minimize_to_tray_on_close and not self._allow_close and self.tray_icon and self.tray_icon.isVisible():
             self.hide()
             event.ignore()
             if not self._tray_notified_once:
@@ -6191,55 +6217,91 @@ class MainWindow(QtWidgets.QWidget):
 
     def cleanup_before_exit(self):
         """Clean up resources before application exit."""
+        logger.info("Cleanup before exit started")
+
+        def _stop_thread(thread_obj, label, wait_ms=2000):
+            """Best-effort stop helper for QThread-like workers."""
+            if not thread_obj:
+                return
+            try:
+                if hasattr(thread_obj, 'isRunning') and thread_obj.isRunning():
+                    logger.info(f"Stopping {label}")
+                    try:
+                        if hasattr(thread_obj, 'cancel'):
+                            thread_obj.cancel()
+                    except Exception:
+                        pass
+                    try:
+                        if hasattr(thread_obj, 'stop'):
+                            thread_obj.stop()
+                    except Exception:
+                        pass
+
+                    if not thread_obj.wait(wait_ms):
+                        logger.warning(f"{label} did not stop in time; terminating thread")
+                        try:
+                            thread_obj.terminate()
+                        except Exception:
+                            pass
+                        try:
+                            thread_obj.wait(1000)
+                        except Exception:
+                            pass
+            except Exception as e:
+                logger.debug(f"Failed to stop {label}: {e}")
+
+        # Stop timers to avoid queued callbacks after quit is requested.
+        for timer_name in ('message_timer', 'seed_status_timer', 'banner_timer'):
+            try:
+                timer_obj = getattr(self, timer_name, None)
+                if timer_obj and timer_obj.isActive():
+                    timer_obj.stop()
+            except Exception:
+                pass
+
         # Kill any running aria2c processes
         try:
             for proc in psutil.process_iter(['pid', 'name']):
                 try:
                     if proc.info['name'] and proc.info['name'].lower() == 'aria2c.exe':
                         logger.info(f"Terminating aria2c.exe (PID: {proc.pid})")
-                        proc.kill()
+                        try:
+                            proc.terminate()
+                            proc.wait(timeout=2)
+                        except Exception:
+                            proc.kill()
                 except (psutil.NoSuchProcess, psutil.AccessDenied):
                     pass
         except Exception as e:
             logger.error(f"Error killing aria2c processes: {e}")
-        
-        # Cancel any running download threads
-        if hasattr(self, 'vhdx_download_thread') and self.vhdx_download_thread:
-            if self.vhdx_download_thread.isRunning():
-                logger.info("Cancelling VHDX download thread")
-                self.vhdx_download_thread.cancel()
-                self.vhdx_download_thread.wait(2000)
-        
-        if hasattr(self, 'download_thread') and self.download_thread:
-            if self.download_thread.isRunning():
-                logger.info("Cancelling download thread")
-                self.download_thread.cancel()
-                self.download_thread.wait(2000)
+
+        # Cancel/stop running workers.
+        _stop_thread(getattr(self, 'vhdx_download_thread', None), 'VHDX download thread')
+        _stop_thread(getattr(self, 'download_thread', None), 'Download thread')
+        _stop_thread(getattr(self, 'clean_thread', None), 'Clean thread')
+        _stop_thread(getattr(self, 'install_thread', None), 'Install thread')
 
         for seed_thread in getattr(self, 'background_diagbox_seed_threads', []):
+            label = "background seed thread"
             try:
-                if seed_thread and seed_thread.isRunning():
-                    logger.info(f"Cancelling background seed thread for {seed_thread.version_name}")
-                    seed_thread.cancel()
-                    seed_thread.wait(2000)
-            except Exception as e:
-                logger.debug(f"Failed to stop background seed thread: {e}")
+                if seed_thread and hasattr(seed_thread, 'version_name'):
+                    label = f"background seed thread for {seed_thread.version_name}"
+            except Exception:
+                pass
+            _stop_thread(seed_thread, label)
 
-        # Stop download thread if running
-        if self.download_thread and self.download_thread.isRunning():
-            self.download_thread.cancel()
-            self.download_thread.wait(1000)  # Wait max 1 second
-        
-        # Stop installation thread if running
-        if self.install_thread and self.install_thread.isRunning():
-            self.install_thread.stop()
-            self.install_thread.wait(2000)  # Wait max 2 seconds
+        try:
+            self.background_diagbox_seed_threads = []
+        except Exception:
+            pass
 
         if self.tray_icon:
             try:
                 self.tray_icon.hide()
             except Exception:
                 pass
+
+        logger.info("Cleanup before exit finished")
 
 
 if __name__ == "__main__":
