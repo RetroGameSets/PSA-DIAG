@@ -27,6 +27,10 @@ else:
     BASE = Path(__file__).resolve().parent
 
 PERSISTENT_DOWNLOAD_FOLDER = r"C:\INSTALL"
+INSTALL_ROOT = Path(PERSISTENT_DOWNLOAD_FOLDER)
+UPDATE_DIR = INSTALL_ROOT / "Update"
+UPDATE_READY_FILE = UPDATE_DIR / "update.ready"
+PRIMARY_EXE_PATH = INSTALL_ROOT / "PSA_DIAG.exe"
 
 # Centralized configuration (moved to `config.py`)
 from config import CONFIG_DIR, APP_VERSION, URL_LAST_VERSION_PSADIAG, URL_VERSION_OPTIONS, URL_REMOTE_MESSAGES, ARCHIVE_PASSWORD, URL_VHD_DOWNLOAD, URL_VHD_TORRENT
@@ -185,6 +189,175 @@ def kill_updater_processes():
                 logger.debug(f"Error while checking process: {e}")
     except Exception as e:
         logger.debug(f"Failed to enumerate processes to kill updater.exe/aria2c.exe: {e}")
+
+
+def get_current_executable_path():
+    """Return the current executable path (frozen exe or script path)."""
+    try:
+        if getattr(sys, 'frozen', False):
+            return Path(sys.executable).resolve()
+    except Exception:
+        pass
+    return Path(os.path.abspath(sys.argv[0])).resolve()
+
+
+def _same_path(path_a, path_b):
+    """Case-insensitive normalized path comparison for Windows paths."""
+    return os.path.normcase(os.path.normpath(str(path_a))) == os.path.normcase(os.path.normpath(str(path_b)))
+
+
+def _read_pending_update_path():
+    """Read pending update executable path from marker file, with fallback to latest exe in update folder."""
+    if not UPDATE_READY_FILE.exists():
+        return None
+
+    try:
+        marker_value = UPDATE_READY_FILE.read_text(encoding='utf-8').strip()
+        if marker_value:
+            candidate = Path(marker_value)
+            if candidate.exists() and candidate.suffix.lower() == '.exe':
+                return candidate
+    except Exception as e:
+        logger.warning(f"Failed to parse update marker file: {e}")
+
+    try:
+        exe_files = sorted(UPDATE_DIR.glob('*.exe'), key=lambda p: p.stat().st_mtime, reverse=True)
+        if exe_files:
+            return exe_files[0]
+    except Exception as e:
+        logger.warning(f"Failed to list pending update executables: {e}")
+
+    return None
+
+
+def cleanup_stale_update_artifacts():
+    """Delete stale update executables when no update is pending."""
+    try:
+        if not UPDATE_DIR.exists() or UPDATE_READY_FILE.exists():
+            return
+        for exe_file in UPDATE_DIR.glob('*.exe'):
+            try:
+                exe_file.unlink()
+                logger.info(f"Deleted stale update file: {exe_file}")
+            except Exception as e:
+                logger.debug(f"Could not remove stale update file {exe_file}: {e}")
+    except Exception as e:
+        logger.debug(f"Stale update cleanup skipped: {e}")
+
+
+def handoff_to_downloaded_update_if_ready():
+    """If an update is marked ready, launch it and exit the current app process."""
+    if not getattr(sys, 'frozen', False):
+        return False
+
+    current_exe = get_current_executable_path()
+    if not _same_path(current_exe, PRIMARY_EXE_PATH):
+        return False
+
+    pending_exe = _read_pending_update_path()
+    if not pending_exe:
+        try:
+            UPDATE_READY_FILE.unlink(missing_ok=True)
+        except Exception:
+            pass
+        return False
+
+    creationflags = subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
+    try:
+        logger.info(f"Pending update detected, launching updater executable: {pending_exe}")
+        subprocess.Popen([
+            str(pending_exe),
+            '--apply-downloaded-update',
+            '--target-exe',
+            str(PRIMARY_EXE_PATH)
+        ], creationflags=creationflags)
+        try:
+            UPDATE_READY_FILE.unlink(missing_ok=True)
+        except Exception:
+            pass
+        return True
+    except Exception as e:
+        logger.error(f"Failed to launch pending update executable {pending_exe}: {e}")
+        return False
+
+
+def apply_downloaded_update_if_requested(argv):
+    """When started from update executable, replace canonical app exe and relaunch it."""
+    if not getattr(sys, 'frozen', False):
+        return False
+
+    current_exe = get_current_executable_path()
+    explicit_apply = '--apply-downloaded-update' in argv
+    marker_targets_current = False
+    try:
+        pending_from_marker = _read_pending_update_path()
+        marker_targets_current = bool(pending_from_marker and _same_path(pending_from_marker, current_exe))
+    except Exception:
+        marker_targets_current = False
+
+    if not (explicit_apply or marker_targets_current):
+        return False
+
+    target_exe = PRIMARY_EXE_PATH
+    if '--target-exe' in argv:
+        try:
+            idx = argv.index('--target-exe')
+            if idx + 1 < len(argv):
+                target_exe = Path(argv[idx + 1])
+        except Exception:
+            pass
+
+    # Prevent replacing the same file path by mistake.
+    if _same_path(current_exe, target_exe):
+        logger.warning("Update apply requested, but current executable equals target path. Skipping apply.")
+        return False
+
+    target_exe.parent.mkdir(parents=True, exist_ok=True)
+    staged_target = target_exe.with_suffix('.new.exe')
+
+    start = time.time()
+    last_error = None
+    while time.time() - start < 30:
+        try:
+            if staged_target.exists():
+                staged_target.unlink()
+            shutil.copy2(current_exe, staged_target)
+            os.replace(staged_target, target_exe)
+            logger.info(f"Update applied successfully: {current_exe} -> {target_exe}")
+            last_error = None
+            break
+        except Exception as e:
+            last_error = e
+            logger.warning(f"Update apply retry after error: {e}")
+            time.sleep(0.5)
+
+    if last_error is not None:
+        logger.error(f"Unable to replace target executable after retries: {last_error}")
+        return False
+
+    # Best-effort cleanup of marker and old update executables.
+    try:
+        UPDATE_READY_FILE.unlink(missing_ok=True)
+    except Exception:
+        pass
+    try:
+        for exe_file in UPDATE_DIR.glob('*.exe'):
+            if not _same_path(exe_file, current_exe):
+                try:
+                    exe_file.unlink()
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+    creationflags = subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
+    try:
+        subprocess.Popen([str(target_exe)], creationflags=creationflags)
+        logger.info(f"Relaunched updated application: {target_exe}")
+        return True
+    except Exception as e:
+        logger.error(f"Failed to relaunch updated executable {target_exe}: {e}")
+        return False
 
 def is_admin():
     """Check if the script is running with admin privileges"""
@@ -2162,26 +2335,22 @@ class CleanThread(QtCore.QThread):
                     current_item += 1
                     self.progress.emit(current_item, total_items)
 
-        # If DPInst succeeded, now delete any deferred folders (those containing DPInst), because
-        # DPInst executable may be inside them and needed to uninstall the driver.
+        # Delete deferred folders (those containing DPInst) after the DPInst step.
+        # Even if DPInst failed, continue cleanup and try to remove these folders.
         if deferred_folders:
-            if dpinst_success:
-                for folder in deferred_folders:
-                    try:
-                        self.item_progress.emit(translator.t('labels.deleting_folder', folder=os.path.basename(folder)))
-                        shutil.rmtree(folder)
-                        logger.info(f"Deleted deferred folder: {folder}")
-                        success_count += 1
-                    except Exception as e:
-                        logger.error(f"Failed to delete deferred folder {folder}: {e}")
-                        self.failed_items.append(f"{folder}: {str(e)}")
+            if not dpinst_success:
+                logger.warning("DPInst not successful; continuing with deferred folder deletion")
 
-                    current_item += 1
-                    self.progress.emit(current_item, total_items)
-            else:
-                for folder in deferred_folders:
-                    logger.warning(f"DPInst not successful; skipping deletion of deferred folder: {folder}")
-                    self.failed_items.append(f"DPInst not run or failed: {os.path.basename(folder)}")
+            for folder in deferred_folders:
+                try:
+                    self.item_progress.emit(translator.t('labels.deleting_folder', folder=os.path.basename(folder)))
+                    shutil.rmtree(folder)
+                    logger.info(f"Deleted deferred folder: {folder}")
+                    success_count += 1
+                except Exception as e:
+                    logger.error(f"Failed to delete deferred folder {folder}: {e}")
+                    self.failed_items.append(f"{folder}: {str(e)}")
+
                     current_item += 1
                     self.progress.emit(current_item, total_items)
 
@@ -3370,11 +3539,11 @@ class MainWindow(QtWidgets.QWidget):
         self.install_thread.start()
 
     def clean_diagbox(self):
-        """Clean Diagbox installation by removing C:\\APP, C:\\AWRoot, and C:\\APPLIC folders"""
+        """Clean Diagbox installation by removing C:\\APP, C:\\AWRoot, C:\\APPLIC, and C:\\oud folders"""
         logger.info("Clean Diagbox initiated")
         # Check which folders exist
         folders_to_delete = []
-        folders = [r"C:\APP", r"C:\AWRoot", r"C:\APPLIC"]
+        folders = [r"C:\APP", r"C:\AWRoot", r"C:\APPLIC", r"C:\oud"]
         
         for folder in folders:
             if os.path.exists(folder):
@@ -3952,6 +4121,10 @@ class MainWindow(QtWidgets.QWidget):
     def check_app_update(self):
         """Check if a newer version of PSA-DIAG is available"""
         try:
+            if UPDATE_READY_FILE.exists():
+                logger.info("An update is already downloaded and pending; skipping online update check")
+                return
+
             logger.info("[STEP 4] -- Checking for app updates...")
             response = requests.get(URL_LAST_VERSION_PSADIAG, timeout=5)
             response.raise_for_status()
@@ -3991,13 +4164,7 @@ class MainWindow(QtWidgets.QWidget):
             logger.warning(f"Update check failed: {e}")
 
     def perform_self_update(self, latest_version):
-        """Download the latest release .exe from GitHub and invoke the updater helper.
-
-        Note: This implementation uses the GitHub Releases API to locate a release asset
-        that looks like an executable (.exe). It downloads to `CONFIG_DIR/updates/`.
-        It then launches the `updater.py` helper (bundled in the project) which will
-        wait for this process to exit, replace the running exe, and optionally restart it.
-        """
+        """Download latest release executable to C:\\INSTALL\\Update and stage it for startup handoff."""
         try:
             # Create a session with retry strategy for robust downloads
             from requests.adapters import HTTPAdapter
@@ -4046,18 +4213,21 @@ class MainWindow(QtWidgets.QWidget):
                 QtWidgets.QMessageBox.warning(self, translator.t('messages.update.title'), translator.t('messages.update.no_asset'))
                 return
 
-            updates_dir = CONFIG_DIR / 'updates'
+            updates_dir = UPDATE_DIR
             updates_dir.mkdir(parents=True, exist_ok=True)
-            target_name = exe_asset.get('name') or f"PSA-DIAG-{latest_version}.exe"
+            target_name = f"PSA_DIAG_update_{latest_version}.exe"
             download_path = str(updates_dir / target_name)
 
-            # If a previous download exists, remove it first to avoid replace conflicts
+            # Keep only one pending update executable.
             try:
-                if os.path.exists(download_path):
-                    logger.info(f"Removing existing downloaded update before re-downloading: {download_path}")
-                    os.remove(download_path)
+                for old_exe in updates_dir.glob('*.exe'):
+                    try:
+                        old_exe.unlink()
+                    except Exception:
+                        pass
+                UPDATE_READY_FILE.unlink(missing_ok=True)
             except Exception as e:
-                logger.warning(f"Failed to remove previous download {download_path}: {e}")
+                logger.warning(f"Failed to clear previous pending updates: {e}")
 
             # Download with progress and robust streaming
             logger.debug(f"Downloading update asset: -> {download_path}")
@@ -4109,147 +4279,28 @@ class MainWindow(QtWidgets.QWidget):
                 
             session.close()
 
-            # Launch updater helper and exit
-            updater_script = BASE / 'updater.py'
-            if not updater_script.exists():
-                # Fallback: use embedded updater in CONFIG_DIR if present
-                updater_script = CONFIG_DIR / 'updater.py'
-
-            if not updater_script.exists():
-                QtWidgets.QMessageBox.warning(self, translator.t('messages.update.title'), translator.t('messages.update.no_updater'))
-                return
-
-            # Determine current executable to replace
-            current_exe = sys.executable if getattr(sys, 'frozen', False) else os.path.abspath(sys.argv[0])
-
-            # Spawn updater: choose the correct launcher depending on frozen state
-            logger.info("Preparing to launch updater helper")
-            creationflags = subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
-
+            # Persist a marker so startup can hand off to the downloaded updater executable.
             try:
-                launch_cmds = []
-                if getattr(sys, 'frozen', False):
-                    # When frozen, BASE points to a temp _MEIPASS folder that gets cleaned up.
-                    # Copy the bundled updater to a persistent location before invoking it.
-                    # Some Windows policies block execution from Roaming/AppData, so we
-                    # stage and try multiple locations.
-                    bundled_updater_standalone = BASE / 'tools' / 'updater.exe'
-                    bundled_updater_dir = BASE / 'tools' / 'updater' / 'updater.exe'
-                    local_appdata = Path(os.getenv('LOCALAPPDATA', '')) if os.getenv('LOCALAPPDATA') else None
-                    temp_dir = Path(os.getenv('TEMP', str(CONFIG_DIR / 'temp')))
-
-                    candidate_dirs = []
-                    if local_appdata:
-                        candidate_dirs.append(local_appdata / 'PSA_DIAG')
-                    candidate_dirs.append(temp_dir / 'PSA_DIAG')
-                    candidate_dirs.append(CONFIG_DIR)
-
-                    # Prefer standalone updater when available.
-                    if bundled_updater_standalone.exists():
-                        updater_file_name = f"updater_{os.getpid()}.exe"
-                        for candidate_dir in candidate_dirs:
-                            try:
-                                candidate_dir.mkdir(parents=True, exist_ok=True)
-                                staged_updater = candidate_dir / updater_file_name
-                                logger.info(f"Copying standalone updater from {bundled_updater_standalone} to {staged_updater}")
-                                shutil.copyfile(bundled_updater_standalone, staged_updater)
-                                launch_cmds.append([
-                                    str(staged_updater), '--target', str(current_exe), '--new', str(download_path),
-                                    '--wait-pid', str(os.getpid()), '--restart'
-                                ])
-                            except Exception as copy_err:
-                                logger.warning(f"Failed to stage standalone updater in {candidate_dir}: {copy_err}")
-
-                    # For onedir updater, copy full folder so _internal dependencies are present.
-                    elif bundled_updater_dir.exists():
-                        bundled_updater_folder = bundled_updater_dir.parent
-                        staged_folder_name = f"updater_{os.getpid()}"
-                        for candidate_dir in candidate_dirs:
-                            try:
-                                candidate_dir.mkdir(parents=True, exist_ok=True)
-                                staged_folder = candidate_dir / staged_folder_name
-                                if staged_folder.exists():
-                                    shutil.rmtree(staged_folder, ignore_errors=True)
-                                logger.info(f"Copying updater folder from {bundled_updater_folder} to {staged_folder}")
-                                shutil.copytree(bundled_updater_folder, staged_folder)
-                                staged_updater = staged_folder / 'updater.exe'
-                                if staged_updater.exists():
-                                    launch_cmds.append([
-                                        str(staged_updater), '--target', str(current_exe), '--new', str(download_path),
-                                        '--wait-pid', str(os.getpid()), '--restart'
-                                    ])
-                                else:
-                                    logger.warning(f"Staged updater executable missing in {staged_folder}")
-                            except Exception as copy_err:
-                                logger.warning(f"Failed to stage updater folder in {candidate_dir}: {copy_err}")
-
-                    # Fallback: Try system python to run updater.py (best-effort)
-                    python_bin = shutil.which('python') or shutil.which('python3') or shutil.which('py')
-                    if python_bin:
-                        launch_cmds.append([
-                            python_bin, str(updater_script), '--target', str(current_exe), '--new', str(download_path),
-                            '--wait-pid', str(os.getpid()), '--restart'
-                        ])
-
-                    if not launch_cmds:
-                        logger.error("No bundled updater and no python in PATH; cannot self-update from frozen exe")
-                        QtWidgets.QMessageBox.warning(self, translator.t('messages.update.title'), translator.t('messages.update.no_updater'))
-                        return
-                else:
-                    # Running from source/interpreter: use current python interpreter
-                    launch_cmds = [[
-                        sys.executable, str(updater_script), '--target', str(current_exe), '--new', str(download_path),
-                        '--wait-pid', str(os.getpid()), '--restart'
-                    ]]
-
-                # Add timeout for handle release (reduced to 15s since process exits quickly)
-                for launch_cmd in launch_cmds:
-                    launch_cmd.extend(['--timeout', '15'])
-                logger.info(f"Updater launch candidates: {launch_cmds}")
-                
-                # Close the application FIRST to release all handles and temp folders
-                # before launching the updater (prevents temp folder deletion warnings)
-                try:
-                    # Shutdown logging to help release any file handles held by this process
-                    import logging as _logging
-                    _logging.shutdown()
-                except Exception:
-                    pass
-                
-                # Show a brief message to user before closing
-                QtWidgets.QMessageBox.information(
-                    self, 
-                    translator.t('messages.update.title'),
-                    translator.t('messages.update.closing_app')
-                )
-                
-                # Launch updater with a small delay to ensure clean shutdown
-                # Ensure updater window is visible: do NOT use CREATE_NO_WINDOW for updater
-                creationflags_for_updater = 0
-                launched = False
-                last_launch_error = None
-                for launch_cmd in launch_cmds:
-                    try:
-                        logger.info(f"Launching updater helper: {launch_cmd}")
-                        subprocess.Popen(launch_cmd, creationflags=creationflags_for_updater)
-                        launched = True
-                        break
-                    except Exception as launch_err:
-                        last_launch_error = launch_err
-                        logger.warning(f"Updater launch attempt failed for {launch_cmd[0]}: {launch_err}")
-
-                if not launched:
-                    raise last_launch_error if last_launch_error else RuntimeError("Updater launch failed")
-                
-                # Give subprocess time to start and PyInstaller time to finish cleanup
-                # This prevents the temp folder warning
-                QtCore.QThread.msleep(500)
+                UPDATE_READY_FILE.write_text(download_path, encoding='utf-8')
+                logger.info(f"Update staged for startup handoff: {download_path}")
             except Exception as e:
-                logger.error(f"Failed to launch updater helper: {e}")
+                raise RuntimeError(f"Unable to persist update marker: {e}")
+
+            # Restart the current application to apply the update through startup flow.
+            current_exe = get_current_executable_path()
+            creationflags = subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
+            QtWidgets.QMessageBox.information(
+                self,
+                translator.t('messages.update.title'),
+                translator.t('messages.update.closing_app')
+            )
+            try:
+                subprocess.Popen([str(current_exe)], creationflags=creationflags)
+            except Exception as e:
+                logger.error(f"Failed to restart application for update apply: {e}")
                 QtWidgets.QMessageBox.warning(self, translator.t('messages.update.title'), translator.t('messages.update.launch_failed', error=str(e)))
                 return
 
-            # Close the application to allow updater to replace the executable
             self._allow_close = True
             QtWidgets.QApplication.quit()
 
@@ -6194,12 +6245,6 @@ class MainWindow(QtWidgets.QWidget):
 if __name__ == "__main__":
     # Hide console window first
     hide_console()
-    # Terminate any leftover updater helpers that might still be running
-    try:
-        kill_updater_processes()
-    except Exception as e:
-        logger.debug(f"kill_updater_processes failed: {e}")
-    
     # Check if running as admin, if not relaunch with admin privileges
     if not is_admin():
         logger.warning("Not running as admin, requesting elevation...")
@@ -6218,6 +6263,27 @@ if __name__ == "__main__":
             logger.info(f"AppUserModelID set to: {myappid}")
         except Exception as e:
             logger.warning(f"Failed to set AppUserModelID: {e}")
+
+    # Update startup flow:
+    # 1) If this executable is a downloaded updater, replace canonical app and relaunch it.
+    # 2) If a pending update marker exists in C:\INSTALL\Update, hand off and exit.
+    try:
+        if apply_downloaded_update_if_requested(sys.argv[1:]):
+            sys.exit(0)
+    except Exception as e:
+        logger.error(f"Apply-downloaded-update startup step failed: {e}", exc_info=True)
+
+    try:
+        if handoff_to_downloaded_update_if_ready():
+            sys.exit(0)
+    except Exception as e:
+        logger.error(f"Pending-update handoff startup step failed: {e}", exc_info=True)
+
+    # Cleanup stale downloaded executables once handoff/apply logic has run.
+    try:
+        cleanup_stale_update_artifacts()
+    except Exception as e:
+        logger.debug(f"cleanup_stale_update_artifacts failed: {e}")
     
     app = QtWidgets.QApplication([])
     app.setQuitOnLastWindowClosed(False)

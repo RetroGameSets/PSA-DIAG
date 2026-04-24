@@ -5,12 +5,6 @@ block_cipher = None
 # Ensure PySide6 dynamic libraries and data files are collected so Qt DLLs
 # are bundled into the executable. This helps avoid "DLL load failed while
 # importing QtCore" errors on target machines.
-import os
-try:
-    from PyInstaller.utils.hooks import collect_data_files, Tree
-except Exception:
-    from PyInstaller.utils.hooks import collect_data_files
-    Tree = None
 
 # Temporarily disable collecting PySide6 data for test builds
 # (this reduces bundle size and avoids PySide-related packaging during tests)
@@ -18,9 +12,8 @@ _pyside6_binaries = []
 _pyside6_datas = []
 # PySide6 collection intentionally disabled for test builds
 
-# Prepare datas list and include updater standalone executable
+# Prepare datas list
 datas_list = [
-    ('updater.py', '.'),
     ('style.qss', '.'),
     ('icons/*.svg', 'icons'),
     ('icons/*.png', 'icons'),
@@ -31,21 +24,6 @@ datas_list = [
     ('config/*.json', 'config'),
     ('config.py', '.'),
 ]
-
-# Include standalone updater.exe from tools/ folder
-updater_exe = os.path.join('tools', 'updater.exe')
-if os.path.isfile(updater_exe):
-    datas_list.append((updater_exe, 'tools'))
-else:
-    # Fallback: check dist/updater.exe
-    updater_exe_dist = os.path.join('dist', 'updater.exe')
-    if os.path.isfile(updater_exe_dist):
-        datas_list.append((updater_exe_dist, 'tools'))
-
-# Include onedir updater folder if available (updater.exe + _internal)
-updater_dir = os.path.join('tools', 'updater')
-if os.path.isdir(updater_dir) and Tree is not None:
-    datas_list += Tree(updater_dir, prefix='tools/updater')
 
 datas = datas_list + _pyside6_datas
 
