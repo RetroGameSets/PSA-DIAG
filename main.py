@@ -33,7 +33,7 @@ UPDATE_READY_FILE = UPDATE_DIR / "update.ready"
 PRIMARY_EXE_PATH = INSTALL_ROOT / "PSA_DIAG.exe"
 
 # Centralized configuration (moved to `config.py`)
-from config import CONFIG_DIR, APP_VERSION, URL_LAST_VERSION_PSADIAG, URL_VERSION_OPTIONS, URL_REMOTE_MESSAGES, ARCHIVE_PASSWORD, URL_VHD_DOWNLOAD, URL_VHD_TORRENT
+from config import CONFIG_DIR, APP_VERSION, URL_LAST_VERSION_PSADIAG, URL_VERSION_OPTIONS, URL_VHD_VERSION_OPTIONS, URL_REMOTE_MESSAGES, ARCHIVE_PASSWORD
 
 # Translation system
 class Translator:
@@ -584,6 +584,17 @@ class SplashScreen(QtWidgets.QWidget):
 
 import os
 
+
+def _remove_partial_download(path):
+    if not path or not os.path.isfile(path):
+        return
+
+    try:
+        os.remove(path)
+    except OSError as e:
+        logger.warning(f"Could not remove partial download {path}: {e}")
+
+
 class DownloadThread(QtCore.QThread):
     progress = QtCore.Signal(int, float, str)  # value, speed_mbs, eta_str
     finished = QtCore.Signal(bool, str)
@@ -689,6 +700,10 @@ class DownloadThread(QtCore.QThread):
                                 progress = 0
                                 eta_str = f"{downloaded / (1024 * 1024):.1f} MB"
                             self.progress.emit(progress, speed, eta_str)
+            if self.total_size > 0 and downloaded != self.total_size:
+                raise IOError(
+                    f"Downloaded file size mismatch ({downloaded} != {self.total_size} bytes)"
+                )
             if self.total_size == 0 or downloaded >= self.total_size:
                 self.progress.emit(1000, 0, "00:00")
             if os.path.exists(self.path):
@@ -699,14 +714,17 @@ class DownloadThread(QtCore.QThread):
                 self.finished.emit(False, f"Download Diagbox {self.last_version_diagbox} failed")
         except requests.exceptions.Timeout:
             logger.error(f"Download timeout")
+            _remove_partial_download(self.path)
             error_msg = translator.t('messages.download.error_timeout')
             self.finished.emit(False, error_msg)
         except requests.exceptions.ConnectionError:
             logger.error(f"Download connection error")
+            _remove_partial_download(self.path)
             error_msg = translator.t('messages.download.error_connection')
             self.finished.emit(False, error_msg)
         except Exception as e:
             logger.error(f"Download exception: {e}", exc_info=True)
+            _remove_partial_download(self.path)
             error_msg = translator.t('messages.download.error_generic', code=str(e))
             self.finished.emit(False, error_msg)
 
@@ -736,6 +754,7 @@ class VHDXDownloadThread(QtCore.QThread):
         self._is_paused = False
     
     def run(self):
+        file_path = None
         try:
             # Create VHD folder at root of selected drive
             vhd_folder = os.path.join(f"{self.destination_drive}:\\", "VHD")
@@ -809,6 +828,10 @@ class VHDXDownloadThread(QtCore.QThread):
                             self.progress.emit(progress, speed, eta_str)
             
             # Download complete
+            if total_size > 0 and downloaded != total_size:
+                raise IOError(
+                    f"Downloaded file size mismatch ({downloaded} != {total_size} bytes)"
+                )
             if total_size == 0 or downloaded >= total_size:
                 self.progress.emit(1000, 0, "00:00")
             
@@ -821,12 +844,15 @@ class VHDXDownloadThread(QtCore.QThread):
                 
         except requests.exceptions.Timeout:
             logger.error("VHDX download timeout")
+            _remove_partial_download(file_path)
             self.finished.emit(False, "Timeout de téléchargement")
         except requests.exceptions.ConnectionError:
             logger.error("VHDX download connection error")
+            _remove_partial_download(file_path)
             self.finished.emit(False, "Erreur de connexion")
         except Exception as e:
             logger.error(f"VHDX download exception: {e}", exc_info=True)
+            _remove_partial_download(file_path)
             self.finished.emit(False, f"Erreur: {str(e)}")
 
 
@@ -980,6 +1006,31 @@ def _ensure_persistent_torrent_file(torrent_url, destination_folder, preferred_n
     return torrent_file_path
 
 
+def _get_vhd_option_filename(option):
+    if not option:
+        return ""
+
+    url = option.get('url') or ''
+    return os.path.basename(unquote(urlsplit(url).path)) if url else ''
+
+
+def _is_installable_vhd_filename(filename):
+    return bool(filename and filename.lower().endswith(('.vhd', '.vhdx')))
+
+
+def _get_remote_file_size_bytes(url, timeout=10):
+    if not url:
+        return 0
+
+    try:
+        response = requests.head(url, allow_redirects=True, timeout=timeout)
+        response.raise_for_status()
+        return int(response.headers.get('content-length', 0))
+    except Exception as e:
+        logger.warning(f"Could not get remote file size for {url}: {e}")
+        return 0
+
+
 class TorrentDownloadThread(QtCore.QThread):
     """Thread for downloading VHDX files via torrent"""
     finished = QtCore.Signal(bool, str)  # success, message
@@ -1101,19 +1152,24 @@ class TorrentDownloadThread(QtCore.QThread):
                 # Parse output to find file index
                 # Format: idx|path/to/file.ext|size
                 target_index = None
+                torrent_entries = []
                 for line in result.stdout.split('\n'):
                     if '|' in line:
                         parts = line.strip().split('|')
                         if len(parts) >= 2:
                             idx = parts[0].strip()
                             filepath = parts[1].strip()
+                            torrent_entries.append((idx, filepath))
                             # Check if filename matches (basename comparison)
                             if filepath.endswith(self.target_file) or os.path.basename(filepath) == self.target_file:
                                 target_index = idx
                                 logger.info(f"Found target file at index: {idx} - {filepath}")
                                 break
-                
-                if not target_index:
+
+                single_file_torrent = len(torrent_entries) == 1
+                if single_file_torrent:
+                    logger.info("Single-file torrent detected, downloading payload directly")
+                elif not target_index:
                     error_msg = f"File '{self.target_file}' not found in torrent"
                     logger.error(error_msg)
                     logger.error(f"Available files:\n{result.stdout}")
@@ -1129,8 +1185,6 @@ class TorrentDownloadThread(QtCore.QThread):
                 aria2c_exe,
                 torrent_file_path,
                 f"--dir={vhd_folder}",
-                f"--select-file={target_index}",  # Only download target file
-                f"--index-out={target_index}={self.target_file}",  # Output directly without subdirs
                 "--file-allocation=none",  # Disable pre-allocation for faster start
                 "--seed-ratio=0",  # Seed without time limit
                 "--bt-max-peers=50",
@@ -1142,7 +1196,13 @@ class TorrentDownloadThread(QtCore.QThread):
                 "--console-log-level=notice",
                 "--show-console-readout=true"  # Show progress on console
             ]
-            
+
+            if not single_file_torrent:
+                cmd.extend([
+                    f"--select-file={target_index}",  # Only download target file
+                    f"--index-out={target_index}={self.target_file}",  # Output directly without subdirs
+                ])
+
             logger.info(f"Starting aria2c download (file index: {target_index})...")
             
             # Emit initial progress
@@ -1166,6 +1226,7 @@ class TorrentDownloadThread(QtCore.QThread):
             self.process_pid = self.process.pid
             logger.info(f"aria2c started with PID: {self.process_pid}")
 
+            aria2_error_lines = []
             while True:
                 if self._is_cancelled:
                     logger.info("Cancellation requested, terminating aria2c...")
@@ -1206,6 +1267,12 @@ class TorrentDownloadThread(QtCore.QThread):
                     remaining = self.process.stdout.read()
                     if remaining:
                         logger.error(f"aria2c output: {remaining}")
+                        aria2_error_lines.extend(
+                            line.strip() for line in remaining.splitlines()
+                            if "[ERROR]" in line or "Exception:" in line
+                        )
+                    if aria2_error_lines:
+                        error_msg += "\n" + "\n".join(aria2_error_lines[-3:])
                     self.finished.emit(False, error_msg)
                     return
 
@@ -1217,6 +1284,12 @@ class TorrentDownloadThread(QtCore.QThread):
                 line = line.strip()
                 if not line:
                     continue
+
+                if "[ERROR]" in line or "Exception:" in line:
+                    aria2_error_lines.append(line)
+                    logger.error(f"aria2c: {line}")
+                elif "[WARN]" in line:
+                    logger.warning(f"aria2c: {line}")
 
                 if "[NOTICE]" in line:
                     if any(keyword in line for keyword in [
@@ -1425,6 +1498,8 @@ class DiagboxTorrentDownloadThread(QtCore.QThread):
             
             self.process_pid = self.process.pid
             logger.info(f"aria2c started with PID: {self.process_pid}")
+
+            aria2_error_lines = []
             
             # Read line by line
             while True:
@@ -1474,6 +1549,12 @@ class DiagboxTorrentDownloadThread(QtCore.QThread):
                         remaining = self.process.stdout.read()
                         if remaining:
                             logger.error(f"aria2c output: {remaining}")
+                            aria2_error_lines.extend(
+                                line.strip() for line in remaining.splitlines()
+                                if "[ERROR]" in line or "Exception:" in line
+                            )
+                        if aria2_error_lines:
+                            error_msg += "\n" + "\n".join(aria2_error_lines[-3:])
                         self.finished.emit(False, error_msg)
                         return
                 
@@ -1486,6 +1567,12 @@ class DiagboxTorrentDownloadThread(QtCore.QThread):
                 line = line.strip()
                 if not line:
                     continue
+
+                if "[ERROR]" in line or "Exception:" in line:
+                    aria2_error_lines.append(line)
+                    logger.error(f"aria2c: {line}")
+                elif "[WARN]" in line:
+                    logger.warning(f"aria2c: {line}")
 
                 if "[NOTICE]" in line:
                     if any(keyword in line for keyword in [
@@ -2405,6 +2492,11 @@ class MainWindow(QtWidgets.QWidget):
         self.seed_status_label = None
         self.seed_status_timer = None
         self.background_diagbox_seed_threads = []
+        self.vhd_version_options = self.load_vhd_version_options()
+        self.selected_vhd_option = None
+        self.vhd_download_link = ""
+        self.vhd_torrent_link = ""
+        self.vhd_selected_filename = ""
         
         # Version options: load from remote JSON (configured in `config.URL_VERSION_OPTIONS`)
         # Falls back to the built-in defaults if remote fetch fails.
@@ -2453,37 +2545,115 @@ class MainWindow(QtWidgets.QWidget):
             self.splash = None
 
     def load_version_options(self):
-        
+        self.version_options_status = "unavailable"
         try:
             resp = requests.get(URL_VERSION_OPTIONS, timeout=6)
+            resp.raise_for_status()
+            data = resp.json()
+            if isinstance(data, dict):
+                if data.get('maintenance') is True:
+                    self.version_options_status = "maintenance"
+                    logger.warning("Version options server explicitly enabled maintenance mode")
+                    return []
+                data = data.get('versions', data.get('options'))
+
+            if not isinstance(data, list):
+                logger.error("Version options response has an invalid root format; expected a JSON list")
+                return []
+
+            options = []
+            for item in data:
+                if isinstance(item, dict):
+                    display = item.get('display_name') or item.get('display') or item.get('name')
+                    version = item.get('version')
+                    url = item.get('url')
+                    torrent_url = item.get('torrent_url')
+                    if display and version and url:
+                        options.append((display, version, url, torrent_url))
+                elif isinstance(item, (list, tuple)) and len(item) >= 3:
+                    torrent_url = item[3] if len(item) > 3 else None
+                    options.append((item[0], item[1], item[2], torrent_url))
+
+            if options:
+                self.version_options_status = "available"
+                logger.info(f"Loaded {len(options)} version options")
+                return options
+
+            if not data:
+                self.version_options_status = "empty"
+                logger.warning("Version options server returned an empty catalog")
+            else:
+                logger.error("Version options JSON contained entries, but none were valid")
+            return []
+        except requests.exceptions.RequestException as e:
+            logger.warning(f"Unable to fetch version options: {e}")
+            return []
+        except Exception as e:
+            logger.error(f"Failed to parse version options response: {e}", exc_info=True)
+            return []
+
+    def load_vhd_version_options(self):
+        try:
+            resp = requests.get(URL_VHD_VERSION_OPTIONS, timeout=6)
             resp.raise_for_status()
             data = resp.json()
             options = []
             if isinstance(data, list):
                 for item in data:
-                    if isinstance(item, dict):
-                        display = item.get('display_name') or item.get('display') or item.get('name')
-                        version = item.get('version')
-                        url = item.get('url')
-                        torrent_url = item.get('torrent_url')
-                        if display and version and url:
-                            options.append((display, version, url, torrent_url))
-                    elif isinstance(item, (list, tuple)) and len(item) >= 3:
-                        torrent_url = item[3] if len(item) > 3 else None
-                        options.append((item[0], item[1], item[2], torrent_url))
+                    if not isinstance(item, dict):
+                        continue
+
+                    display = item.get('display_name') or item.get('display') or item.get('name')
+                    version = item.get('version')
+                    url = item.get('url')
+                    torrent_url = item.get('torrent_url')
+                    if display and version and url:
+                        options.append({
+                            'display_name': display,
+                            'version': version,
+                            'url': url,
+                            'torrent_url': torrent_url,
+                            'filename': _get_vhd_option_filename(item),
+                        })
 
             if options:
-                logger.info(f"Loaded {len(options)} version options")
-                return options
+                logger.info(f"Loaded {len(options)} VHD version option(s)")
             else:
-                logger.warning("Version options JSON did not contain valid entries")
-                return []
+                logger.warning("VHD version options JSON did not contain valid entries")
+            return options
         except requests.exceptions.RequestException:
-            logger.warning("Unable to reach update server. Please check your network connection.")
+            logger.warning("Unable to reach VHD version server. Please check your network connection.")
             return []
         except Exception as e:
-            logger.warning(f"Failed to load version options: {e}")
+            logger.warning(f"Failed to load VHD version options: {e}")
             return []
+
+    def get_selected_vhd_option(self):
+        if not hasattr(self, 'vhdx_version_combo'):
+            return None
+
+        selected_option = self.vhdx_version_combo.currentData()
+        return selected_option if isinstance(selected_option, dict) else None
+
+    def on_vhd_version_changed(self):
+        option = self.get_selected_vhd_option()
+        self.selected_vhd_option = option
+        self.vhd_download_link = option.get('url', '') if option else ''
+        self.vhd_torrent_link = option.get('torrent_url', '') if option else ''
+        self.vhd_selected_filename = _get_vhd_option_filename(option)
+
+        is_installable = _is_installable_vhd_filename(self.vhd_selected_filename)
+        if hasattr(self, 'vhdx_install_btn'):
+            self.vhdx_install_btn.setEnabled(is_installable)
+            self.vhdx_install_btn.setToolTip(
+                "" if is_installable else "La version selectionnee telecharge une archive .7z. L'installation directe n'est pas disponible."
+            )
+        if hasattr(self, 'vhdx_auto_install_toggle'):
+            if not is_installable:
+                self.vhdx_auto_install_toggle.setChecked(False)
+            self.vhdx_auto_install_toggle.setEnabled(is_installable)
+
+        self.fetch_vhdx_download_size()
 
     def load_remote_messages(self):
         """Load remote messages/banners JSON and update the homepage banner.
@@ -4048,17 +4218,6 @@ class MainWindow(QtWidgets.QWidget):
                     torrent_url = selected_data[2]
                     has_torrent = bool(torrent_url)
 
-            # Si le torrent est dispo pour la version sélectionnée, on met le mode torrent par défaut
-            if has_torrent and hasattr(self, 'diagbox_mode_combo') and self.diagbox_mode_combo:
-                # 1 = index du mode torrent (supposé)
-                if self.diagbox_mode_combo.currentData() != "torrent":
-                    model = self.diagbox_mode_combo.model()
-                    if model and model.rowCount() > 1:
-                        torrent_item = model.item(1)
-                        if torrent_item and torrent_item.isEnabled():
-                            self.diagbox_mode_combo.setCurrentIndex(1)
-                            selected_mode = "torrent"
-
             has_multiple_sources = has_torrent
 
             if hasattr(self, 'diagbox_mode_combo'):
@@ -4431,10 +4590,10 @@ class MainWindow(QtWidgets.QWidget):
         
         # Create appropriate download thread
         if selected_mode == "torrent":
-            logger.info(f"Starting torrent download from: {torrent_url}")
+            logger.info(f"Starting torrent download")
             self.download_thread = DiagboxTorrentDownloadThread(torrent_url, file_path, self.last_version_diagbox, total_size)
         else:
-            logger.info(f"Starting direct download from: {active_url}")
+            logger.info(f"Starting direct download")
             self.download_thread = DownloadThread(active_url, file_path, self.last_version_diagbox, total_size)
         
         self.download_thread.progress.connect(self.update_progress)
@@ -5181,10 +5340,16 @@ class MainWindow(QtWidgets.QWidget):
         version_label = QtWidgets.QLabel(translator.t('labels.select_version'))
 
         if not getattr(self, 'version_options', None):
-            # Show maintenance message instead of combo when no versions available
-            maint_msg = translator.t('messages.download.maintenance')
+            catalog_status = getattr(self, 'version_options_status', 'unavailable')
+            if catalog_status == 'maintenance':
+                catalog_key = 'messages.download.maintenance'
+            elif catalog_status == 'empty':
+                catalog_key = 'messages.download.catalog_empty'
+            else:
+                catalog_key = 'messages.download.catalog_unavailable'
+            catalog_msg = translator.t(catalog_key)
             self.version_combo = None
-            self.version_maintenance = QtWidgets.QLabel(maint_msg)
+            self.version_maintenance = QtWidgets.QLabel(catalog_msg)
             self.version_maintenance.setWordWrap(True)
             self.version_maintenance.setStyleSheet('color: #b94a48;')
             self.version_maintenance.setMinimumWidth(200)
@@ -5210,6 +5375,8 @@ class MainWindow(QtWidgets.QWidget):
         self.diagbox_mode_combo = QtWidgets.QComboBox()
         self.diagbox_mode_combo.addItem(translator.t('labels.download_direct'), "direct")
         self.diagbox_mode_combo.addItem(translator.t('labels.download_torrent'), "torrent")
+        if self.get_diagbox_version_options_for_mode("torrent"):
+            self.diagbox_mode_combo.setCurrentIndex(1)
         self.diagbox_mode_combo.setMinimumWidth(120)
         self.diagbox_mode_combo.setVisible(False)
         mode_label.setVisible(False)
@@ -5329,9 +5496,16 @@ class MainWindow(QtWidgets.QWidget):
         # Allow install if local files exist
         try:
             if getattr(self, '_disable_actions_due_to_maintenance', False):
+                catalog_status = getattr(self, 'version_options_status', 'unavailable')
+                if catalog_status == 'maintenance':
+                    catalog_tooltip_key = 'messages.download.maintenance_tooltip'
+                elif catalog_status == 'empty':
+                    catalog_tooltip_key = 'messages.download.catalog_empty_tooltip'
+                else:
+                    catalog_tooltip_key = 'messages.download.catalog_unavailable_tooltip'
                 if hasattr(self, 'download_button') and self.download_button is not None:
                     self.download_button.setEnabled(False)
-                    self.download_button.setToolTip(translator.t('messages.download.maintenance_tooltip'))
+                    self.download_button.setToolTip(translator.t(catalog_tooltip_key))
                 # Check if local files exist - if yes, allow install
                 downloaded_versions = self.check_downloaded_versions()
                 if hasattr(self, 'install_button') and self.install_button is not None:
@@ -5340,7 +5514,7 @@ class MainWindow(QtWidgets.QWidget):
                         self.install_button.setToolTip(translator.t('messages.install.local_file_available'))
                     else:
                         self.install_button.setEnabled(False)
-                        self.install_button.setToolTip(translator.t('messages.download.maintenance_tooltip'))
+                        self.install_button.setToolTip(translator.t(catalog_tooltip_key))
                 # Also disable banner download action
                 try:
                     self.install_banner_download.setEnabled(False)
@@ -5404,12 +5578,25 @@ class MainWindow(QtWidgets.QWidget):
         self.vhdx_size_header.setObjectName("sectionHeader")
         self.vhdx_size_header.setWordWrap(True)
         layout.addWidget(self.vhdx_size_header)
-        
-        # VHD Download URL from config
-        self.vhd_download_link = URL_VHD_DOWNLOAD
-        
-        # Fetch download size on page load
-        QtCore.QTimer.singleShot(500, self.fetch_vhdx_download_size)
+
+        version_layout = QtWidgets.QHBoxLayout()
+        version_label = QtWidgets.QLabel(translator.t('labels.select_version'))
+        version_label.setStyleSheet("font-size: 12px;")
+        self.vhdx_version_combo = QtWidgets.QComboBox()
+        self.vhdx_version_combo.setMinimumWidth(420)
+        for option in self.vhd_version_options:
+            self.vhdx_version_combo.addItem(option['display_name'], userData=option)
+        self.vhdx_version_combo.currentIndexChanged.connect(self.on_vhd_version_changed)
+        version_layout.addWidget(version_label)
+        version_layout.addWidget(self.vhdx_version_combo)
+        version_layout.addStretch()
+        layout.addLayout(version_layout)
+
+        if self.vhdx_version_combo.count() == 0:
+            self.vhdx_version_combo.addItem("Aucune version VHD disponible", userData=None)
+            self.vhdx_version_combo.setEnabled(False)
+
+        QtCore.QTimer.singleShot(0, self.on_vhd_version_changed)
 
         # Download server selection
         server_layout = QtWidgets.QHBoxLayout()
@@ -5609,19 +5796,14 @@ class MainWindow(QtWidgets.QWidget):
     def fetch_vhdx_download_size(self):
         """Fetch VHDX download size from URL"""
         if not self.vhd_download_link:
-            # Default URL or fetch from config
-            # TODO: Set actual VHD download link
-            self.vhd_download_link = ""  # Placeholder
             self.vhdx_size_header.setText(translator.t('vhd.labels.download_size_default'))
             return
         
         try:
             logger.debug(f"Fetching VHDX file size from: {self.vhd_download_link}")
-            response = requests.head(self.vhd_download_link, allow_redirects=True, timeout=10)
-            content_length = response.headers.get('Content-Length')
+            file_size_bytes = _get_remote_file_size_bytes(self.vhd_download_link)
             
-            if content_length:
-                file_size_bytes = int(content_length)
+            if file_size_bytes:
                 file_size_gb = round(file_size_bytes / 1024 / 1024 / 1024, 2)
                 
                 self.vhdx_size_header.setText(
@@ -5648,6 +5830,15 @@ class MainWindow(QtWidgets.QWidget):
 
     def download_vhdx(self):
         """Download VHDX file"""
+        selected_option = self.get_selected_vhd_option()
+        if not selected_option:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Version indisponible",
+                "Aucune version VHD n'est disponible pour le telechargement."
+            )
+            return
+
         # Check disk space before downloading
         if not self.check_vhdx_disk_space():
             selected_drive = self.vhdx_disk_combo.currentData()
@@ -5673,6 +5864,12 @@ class MainWindow(QtWidgets.QWidget):
         # Get selected server mode
         selected_server = self.vhdx_server_combo.currentData()
         logger.info(f"Selected download server: {selected_server}")
+        logger.info(f"Selected VHD version: {selected_option.get('version')}")
+
+        # Get selected drive
+        selected_drive = self.vhdx_disk_combo.currentData()
+        target_filename = self.vhd_selected_filename or _get_vhd_option_filename(selected_option)
+        target_path = os.path.join(f"{selected_drive}:\\", "VHD", target_filename)
         
         # Check if URL is configured
         if selected_server == "direct" and not self.vhd_download_link:
@@ -5683,6 +5880,28 @@ class MainWindow(QtWidgets.QWidget):
                 "Veuillez contacter l'administrateur."
             )
             return
+        if selected_server == "torrent" and not self.vhd_torrent_link:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Configuration manquante",
+                "L'URL torrent de cette version VHD n'est pas configuree."
+            )
+            return
+
+        if selected_server == "torrent" and self.vhd_download_link and os.path.exists(target_path):
+            expected_size = _get_remote_file_size_bytes(self.vhd_download_link)
+            current_size = os.path.getsize(target_path)
+            if expected_size > 0 and current_size == expected_size:
+                message = f"Fichier deja present: {target_filename}"
+                logger.info(f"{message} ({current_size} bytes)")
+                if hasattr(self, 'footer_label'):
+                    self.footer_label.setText(message)
+                if hasattr(self, 'footer_progress'):
+                    self.footer_progress.setRange(0, 1000)
+                    self.footer_progress.setValue(1000)
+                QtWidgets.QMessageBox.information(self, translator.t('vhd.download.success'), message)
+                QtCore.QTimer.singleShot(3000, self.reset_footer)
+                return
         
         # Disable buttons
         self.set_buttons_enabled(False)
@@ -5695,9 +5914,6 @@ class MainWindow(QtWidgets.QWidget):
             self.footer_progress.setValue(0)
             self.footer_progress.setFormat("%p%")
         
-        # Get selected drive
-        selected_drive = self.vhdx_disk_combo.currentData()
-        
         # Show pause and cancel buttons
         if self.vhd_pause_button:
             self.vhd_pause_button.setVisible(True)
@@ -5709,10 +5925,10 @@ class MainWindow(QtWidgets.QWidget):
         if selected_server == "torrent":
             logger.info(f"Starting VHDX torrent download to drive {selected_drive}:")
             self.vhdx_download_thread = TorrentDownloadThread(
-                URL_VHD_TORRENT,
+                self.vhd_torrent_link,
                 f"{selected_drive}:\\VHD",
                 selected_drive,
-                target_file="PSA-DIAG.vhdx"
+                target_file=target_filename
             )
         else:  # direct
             logger.info(f"Starting VHDX direct download to drive {selected_drive}:")
@@ -5772,7 +5988,11 @@ class MainWindow(QtWidgets.QWidget):
             )
             
             # If auto-install is enabled, start installation
-            if hasattr(self, 'vhdx_auto_install_toggle') and self.vhdx_auto_install_toggle.isChecked():
+            if (
+                hasattr(self, 'vhdx_auto_install_toggle')
+                and self.vhdx_auto_install_toggle.isChecked()
+                and _is_installable_vhd_filename(self.vhd_selected_filename)
+            ):
                 logger.info("Auto-install enabled, starting VHDX installation")
                 QtCore.QTimer.singleShot(1000, self.install_vhdx)
         else:
@@ -5787,7 +6007,17 @@ class MainWindow(QtWidgets.QWidget):
 
     def install_vhdx(self):
         """Install VHDX file"""
-        # Search for PSA-DIAG.vhdx on all available drives
+        selected_option = self.get_selected_vhd_option()
+        selected_filename = self.vhd_selected_filename or _get_vhd_option_filename(selected_option) or "PSA-DIAG.vhdx"
+        if selected_option and not _is_installable_vhd_filename(selected_filename):
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Installation indisponible",
+                "La version selectionnee telecharge une archive .7z. L'installation VHD directe necessite un fichier .vhd ou .vhdx."
+            )
+            return
+
+        # Search for selected VHDX/VHD on all available drives
         vhdx_file = None
         found_drive = None
         
@@ -5800,12 +6030,12 @@ class MainWindow(QtWidgets.QWidget):
                 if os.path.exists(drive):
                     available_drives.append(letter)
             
-            logger.info(f"Searching for PSA-DIAG.vhdx on drives: {', '.join(available_drives)}")
+            logger.info(f"Searching for {selected_filename} on drives: {', '.join(available_drives)}")
             
-            # Search for PSA-DIAG.vhdx in X:\VHD\ on all drives
+            # Search for the selected payload in X:\VHD\ on all drives
             for letter in available_drives:
                 vhd_folder = os.path.join(f"{letter}:\\", "VHD")
-                target_file = os.path.join(vhd_folder, "PSA-DIAG.vhdx")
+                target_file = os.path.join(vhd_folder, selected_filename)
                 
                 if os.path.exists(target_file):
                     vhdx_file = target_file
@@ -5819,8 +6049,8 @@ class MainWindow(QtWidgets.QWidget):
             QtWidgets.QMessageBox.warning(
                 self,
                 "Fichier introuvable",
-                "Aucun fichier PSA-DIAG.vhdx trouvé dans X:\\VHD\\ sur aucun lecteur.\n\n"
-                "Veuillez d'abord télécharger le fichier VHDX."
+                f"Aucun fichier {selected_filename} trouve dans X:\\VHD\\ sur aucun lecteur.\n\n"
+                "Veuillez d'abord telecharger le fichier VHD/VHDX selectionne."
             )
             return
         

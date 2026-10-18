@@ -12,8 +12,5 @@ ARCHIVE_PASSWORD = ""
 # Remote endpoints
 URL_LAST_VERSION_PSADIAG = "https://psa-diag.fr/diagbox/install/last_version_psadiag.json"
 URL_VERSION_OPTIONS = "https://psa-diag.fr/diagbox/install/available_versions.json"
+URL_VHD_VERSION_OPTIONS = "https://psa-diag.fr/diagbox/install/available_versions_vhd.json"
 URL_REMOTE_MESSAGES = "https://psa-diag.fr/diagbox/install/banner.json"
-
-# VHD/VHDX download URL
-URL_VHD_DOWNLOAD = "https://archive.org/download/psadiag/PSA-DIAG.vhdx"
-URL_VHD_TORRENT = "https://archive.org/download/psadiag/psadiag_archive.torrent"
